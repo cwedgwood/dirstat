@@ -3,17 +3,25 @@
 
 name: CI
 
+# Building every branch AND every pull request means a same-repo PR builds
+# twice on the same commit: once for the branch push, once for the PR. The two
+# runs also escape each other's concurrency group, because github.ref is
+# refs/heads/<branch> for one and refs/pull/<n>/merge for the other. Build main
+# on push and everything else through its pull request; a topic branch with no
+# PR open can still be built with workflow_dispatch.
 on:
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# Keyed on the PR number where there is one, so that pushing again to a branch
+# supersedes the in-flight run for that PR rather than racing it.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:

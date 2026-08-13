@@ -14,6 +14,11 @@ permissions:
   actions: read
   packages: read
 
+# Analysis is slow and there is no value in two of them racing on the same ref.
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   analyze:
     name: analyze
