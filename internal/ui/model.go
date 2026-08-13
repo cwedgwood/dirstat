@@ -12,6 +12,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/cwedgwood/dirstat/internal/format"
 	"github.com/cwedgwood/dirstat/internal/inventory"
@@ -540,9 +541,8 @@ func (m *Model) renderColumns(width int) string {
 	if m.compact {
 		nameWidth := max(8, width-44)
 		return fmt.Sprintf(
-			"%-*s %-11s %9s %9s %10s",
-			nameWidth,
-			"DIRECTORY",
+			"%s %-11s %9s %9s %10s",
+			padCells("DIRECTORY", nameWidth),
 			"STATUS",
 			"FILES",
 			"INODES",
@@ -551,9 +551,8 @@ func (m *Model) renderColumns(width int) string {
 	}
 	nameWidth := max(8, width-55)
 	return fmt.Sprintf(
-		"%-*s %-11s %9s %9s %10s %10s",
-		nameWidth,
-		"DIRECTORY",
+		"%s %-11s %9s %9s %10s %10s",
+		padCells("DIRECTORY", nameWidth),
 		"STATUS",
 		"FILES",
 		"INODES",
@@ -594,9 +593,8 @@ func (m *Model) renderRow(item row, width int) string {
 	if m.compact {
 		nameWidth := max(8, width-44)
 		return fmt.Sprintf(
-			"%-*s %-11s %9s %9s %10s",
-			nameWidth,
-			truncate(name, nameWidth),
+			"%s %-11s %9s %9s %10s",
+			padCells(name, nameWidth),
 			status,
 			format.Count(node.metrics.Files),
 			format.Count(node.metrics.Inodes),
@@ -605,9 +603,8 @@ func (m *Model) renderRow(item row, width int) string {
 	}
 	nameWidth := max(8, width-55)
 	return fmt.Sprintf(
-		"%-*s %-11s %9s %9s %10s %10s",
-		nameWidth,
-		truncate(name, nameWidth),
+		"%s %-11s %9s %9s %10s %10s",
+		padCells(name, nameWidth),
 		status,
 		format.Count(node.metrics.Files),
 		format.Count(node.metrics.Inodes),
@@ -749,14 +746,25 @@ func truncate(value string, width int) string {
 	if width <= 0 {
 		return ""
 	}
-	if utf8.RuneCountInString(value) <= width {
-		return value
-	}
+	// A tail needs room of its own, so below its width fall back to a bare cut,
+	// matching what a narrow terminal used to get.
 	if width <= 3 {
-		return string([]rune(value)[:width])
+		return ansi.Truncate(value, width, "")
 	}
-	runes := []rune(value)
-	return string(runes[:width-3]) + "..."
+	return ansi.Truncate(value, width, "...")
+}
+
+// padCells fits value into exactly width terminal cells. Truncation stops on a
+// grapheme cluster boundary, so a two-cell cluster meeting a single remaining
+// cell is dropped rather than half-printed: a partial cell cannot be drawn, and
+// overflowing by one cell would shift every column on the row. The resulting
+// one-cell gap is filled here, so short and overlong names align identically.
+func padCells(value string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	fitted := truncate(value, width)
+	return fitted + strings.Repeat(" ", max(0, width-ansi.StringWidth(fitted)))
 }
 
 func trimLastRune(value string) string {
