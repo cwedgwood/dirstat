@@ -12,6 +12,9 @@ make build
 
 This creates `./dirstat`.
 
+Tagged releases publish static Linux binaries for amd64, arm64, 386, and
+riscv64 with SHA-256 checksums.
+
 ## Run
 
 ```sh
