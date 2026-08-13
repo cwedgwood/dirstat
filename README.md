@@ -117,6 +117,11 @@ roll-up uses the largest allocated and apparent values seen during that scan. A 
 atomic filesystem snapshot; files created, removed, relinked, or replaced during traversal can make
 partial totals change or produce visible errors.
 
+A directory's roll-up includes provisional totals from subtrees that are still being read, so it
+climbs throughout the scan instead of jumping at the end. Hard links are only deduplicated where two
+subtrees meet, which cannot happen until both are complete, so a provisional row can over-count a
+shared inode and settle to a smaller value when it becomes final. Final totals are exact.
+
 Rows whose roll-ups are still provisional show `updating...` in the **Status** column. The text
 disappears when the row is final. A trailing `!` means the subtree completed with one or more
 errors. Press `d` to inspect error samples and exact totals.

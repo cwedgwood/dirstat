@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 
@@ -24,7 +25,12 @@ const (
 	syntheticRootID = "\x00"
 	maxErrorSamples = 8
 	readBatchSize   = 256
-	updateEvery     = 64
+
+	// defaultRefreshInterval is how often ancestors whose provisional totals
+	// moved are re-emitted. Refreshes are coalesced onto this tick, so the
+	// cost is one event per changed ancestor per interval regardless of how
+	// many descendants were read in between.
+	defaultRefreshInterval = 100 * time.Millisecond
 )
 
 // State describes the current scan state of one directory.
@@ -51,6 +57,10 @@ type Root struct {
 type Options struct {
 	Workers          int
 	CrossFilesystems bool
+
+	// refreshInterval overrides defaultRefreshInterval so tests can observe
+	// provisional propagation without waiting on wall-clock time.
+	refreshInterval time.Duration
 }
 
 func (r *directoryResult) addExpectedDirectory() {
@@ -218,6 +228,9 @@ func Start(ctx context.Context, roots []Root, options Options) <-chan Event {
 	if options.Workers <= 0 {
 		options.Workers = DefaultWorkers()
 	}
+	if options.refreshInterval <= 0 {
+		options.refreshInterval = defaultRefreshInterval
+	}
 	events := make(chan Event, 256)
 	go coordinate(ctx, roots, options, events)
 	return events
@@ -255,13 +268,19 @@ type directoryResult struct {
 }
 
 type directoryState struct {
-	task         directoryTask
-	accumulator  inventory.Accumulator
+	task        directoryTask
+	accumulator inventory.Accumulator
+	// provisional holds the totals of descendants that have been read but
+	// whose accumulators have not yet been merged into this one. Hard links
+	// are only deduplicated on merge, so this can over-count inodes and bytes;
+	// it is emptied one descendant at a time as they finalize, which is why a
+	// displayed roll-up can settle downwards but never has to grow at the end.
+	provisional  inventory.Metrics
 	pending      int
 	scanned      bool
+	published    bool
 	finalized    bool
 	skipState    State
-	mergeCount   int
 	errorSamples []string
 }
 
@@ -318,6 +337,7 @@ func coordinate(
 	}
 
 	states := make(map[string]*directoryState)
+	refresh := make(map[string]struct{})
 	visitedDirectories := make(map[inventory.InodeKey]string)
 	synthetic = &directoryState{
 		task:    directoryTask{path: syntheticRootID},
@@ -353,10 +373,50 @@ func coordinate(
 	}
 
 	emitNode := func(state *directoryState, nodeState State) bool {
+		delete(refresh, state.task.path)
 		return sendEvent(ctx, events, Event{
 			Node:     nodeUpdate(state, nodeState),
 			Progress: progressWithQueue(progress, len(queue), active),
 		})
+	}
+
+	// adjustAncestors folds delta into the provisional total of every ancestor
+	// and marks them for the next refresh tick. Trees are shallow relative to
+	// their width, so walking the parent chain per directory costs a handful
+	// of additions; recomputing roll-ups from the live state map instead would
+	// scale with the size of the unfinished frontier.
+	adjustAncestors := func(startID string, delta inventory.Metrics, add bool) {
+		for id := startID; id != ""; {
+			state, exists := states[id]
+			if !exists {
+				return
+			}
+			if add {
+				addMetrics(&state.provisional, delta)
+			} else {
+				subtractMetrics(&state.provisional, delta)
+			}
+			if id != syntheticRootID {
+				refresh[id] = struct{}{}
+			}
+			id = state.task.parentID
+		}
+	}
+
+	// flushRefresh emits one event per ancestor that moved since the last
+	// tick, however many descendants contributed to the movement.
+	flushRefresh := func() bool {
+		for id := range refresh {
+			state, exists := states[id]
+			if !exists {
+				delete(refresh, id)
+				continue
+			}
+			if !emitNode(state, StateScanning) {
+				return false
+			}
+		}
+		return true
 	}
 
 	var finalize func(string) bool
@@ -396,23 +456,31 @@ func coordinate(
 		if state.accumulator.Metrics().Errors > 0 {
 			mergeErrorSamples(parent, state)
 		}
-		parent.accumulator.Merge(&state.accumulator)
-		parent.pending--
-		parent.mergeCount++
-		delete(states, id)
-
-		if parent.task.path != syntheticRootID &&
-			parent.pending > 0 &&
-			parent.mergeCount%updateEvery == 0 {
-			if !emitNode(parent, StateScanning) {
-				return false
-			}
+		if state.published {
+			adjustAncestors(state.task.parentID, state.accumulator.Metrics(), false)
 		}
+		before := parent.accumulator.Metrics()
+		parent.accumulator.Merge(&state.accumulator)
+		// The merge is where cross-subtree hard links are finally charged
+		// once, so the parent's exact growth is usually less than what this
+		// child had provisionally contributed to its own ancestors.
+		adjustAncestors(
+			parent.task.parentID,
+			metricsDelta(before, parent.accumulator.Metrics()),
+			true,
+		)
+		parent.pending--
+		delete(states, id)
+		delete(refresh, id)
+
 		if parent.scanned && parent.pending == 0 {
 			return finalize(parent.task.path)
 		}
 		return true
 	}
+
+	ticker := time.NewTicker(options.refreshInterval)
+	defer ticker.Stop()
 
 	for !completed {
 		var nextTask directoryTask
@@ -426,6 +494,12 @@ func coordinate(
 		case <-ctx.Done():
 			close(taskChannel)
 			return
+
+		case <-ticker.C:
+			if !flushRefresh() {
+				close(taskChannel)
+				return
+			}
 
 		case sendTask <- nextTask:
 			queue[0] = directoryTask{}
@@ -442,6 +516,8 @@ func coordinate(
 			state.accumulator = result.accumulator
 			state.errorSamples = qualifyErrorSamples(state.task.path, result.errorSamples)
 			state.pending = len(result.children)
+			state.published = true
+			adjustAncestors(state.task.parentID, state.accumulator.Metrics(), true)
 
 			for _, child := range result.children {
 				childTask := directoryTask{
@@ -667,6 +743,8 @@ func nodeUpdate(state *directoryState, nodeState State) *NodeUpdate {
 	if state.task.path == string(filepath.Separator) {
 		name = state.task.path
 	}
+	metrics := state.accumulator.Metrics()
+	addMetrics(&metrics, state.provisional)
 	return &NodeUpdate{
 		ID:           state.task.path,
 		ParentID:     state.task.parentID,
@@ -674,8 +752,39 @@ func nodeUpdate(state *directoryState, nodeState State) *NodeUpdate {
 		Name:         name,
 		Root:         state.task.root,
 		State:        nodeState,
-		Metrics:      state.accumulator.Metrics(),
+		Metrics:      metrics,
 		ErrorSamples: append([]string(nil), state.errorSamples...),
+	}
+}
+
+func addMetrics(target *inventory.Metrics, delta inventory.Metrics) {
+	target.Files += delta.Files
+	target.Directories += delta.Directories
+	target.Inodes += delta.Inodes
+	target.Allocated += delta.Allocated
+	target.Apparent += delta.Apparent
+	target.Errors += delta.Errors
+}
+
+func subtractMetrics(target *inventory.Metrics, delta inventory.Metrics) {
+	target.Files -= delta.Files
+	target.Directories -= delta.Directories
+	target.Inodes -= delta.Inodes
+	target.Allocated -= delta.Allocated
+	target.Apparent -= delta.Apparent
+	target.Errors -= delta.Errors
+}
+
+// metricsDelta reports how much an accumulator grew. Merge never reduces a
+// field, so the result is the amount an ancestor must now account for.
+func metricsDelta(before inventory.Metrics, after inventory.Metrics) inventory.Metrics {
+	return inventory.Metrics{
+		Files:       after.Files - before.Files,
+		Directories: after.Directories - before.Directories,
+		Inodes:      after.Inodes - before.Inodes,
+		Allocated:   after.Allocated - before.Allocated,
+		Apparent:    after.Apparent - before.Apparent,
+		Errors:      after.Errors - before.Errors,
 	}
 }
 
