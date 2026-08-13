@@ -1,5 +1,7 @@
 # Tagged releases build static Linux binaries and publish them with SHA-256
-# checksums. Actions are pinned to immutable commit SHAs.
+# checksums. The tag and commit are stamped into each binary so `dirstat
+# --version` can name the release a bug report came from. Actions are pinned to
+# immutable commit SHAs.
 
 name: Release
 
@@ -44,7 +46,7 @@ jobs:
             mkdir -p "dist/$package"
             GOOS=linux GOARCH="$arch" go build \
               -trimpath \
-              -ldflags="-s -w" \
+              -ldflags="-s -w -X main.version=${GITHUB_REF_NAME} -X main.commit=${GITHUB_SHA}" \
               -o "dist/$package/dirstat" \
               ./cmd/dirstat
             tar -C dist -czf "dist/$package.tar.gz" "$package"
