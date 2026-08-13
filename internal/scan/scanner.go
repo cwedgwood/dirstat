@@ -15,7 +15,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"dirstat/internal/inventory"
+	"github.com/cwedgwood/dirstat/internal/inventory"
 )
 
 const (

@@ -1,28 +1,41 @@
 # dirstat
 
+```sh
+go install github.com/cwedgwood/dirstat/cmd/dirstat@latest
+dirstat ~
+```
+
 `dirstat` is a read-only Linux terminal application for finding directory trees that consume large
 numbers of file entries, unique inodes, or disk blocks. It scans incrementally and displays
 recursively rolled-up totals in an interactive tree.
 
-## Build
+`go install` needs Go 1.25 or newer and puts `dirstat` in `$(go env GOPATH)/bin`, which must be on
+your `$PATH`.
+
+## Other ways to install
+
+Download a binary from the [releases page](https://github.com/cwedgwood/dirstat/releases): each
+tagged release publishes static Linux binaries for amd64, arm64, 386, and riscv64 with SHA-256
+checksums.
+
+Or build from source:
 
 ```sh
+git clone https://github.com/cwedgwood/dirstat
+cd dirstat
 make build
 ```
 
 This creates `./dirstat`.
 
-Tagged releases publish static Linux binaries for amd64, arm64, 386, and
-riscv64 with SHA-256 checksums.
-
 ## Run
 
 ```sh
-./dirstat
-./dirstat /path/to/inspect
-./dirstat /first/root /second/root
-./dirstat --workers 16 /path/to/inspect
-./dirstat --cross-filesystems /
+dirstat
+dirstat /path/to/inspect
+dirstat /first/root /second/root
+dirstat --workers 16 /path/to/inspect
+dirstat --cross-filesystems /
 ```
 
 With no path, the current working directory is scanned. Scan roots must be directories and may not

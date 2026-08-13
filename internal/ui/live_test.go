@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"dirstat/internal/scan"
+	"github.com/cwedgwood/dirstat/internal/scan"
 )
 
 func TestLiveUI(t *testing.T) {

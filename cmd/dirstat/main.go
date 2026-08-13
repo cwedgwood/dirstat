@@ -10,8 +10,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"dirstat/internal/scan"
-	"dirstat/internal/ui"
+	"github.com/cwedgwood/dirstat/internal/scan"
+	"github.com/cwedgwood/dirstat/internal/ui"
 )
 
 func main() {

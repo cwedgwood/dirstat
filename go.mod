@@ -1,4 +1,4 @@
-module dirstat
+module github.com/cwedgwood/dirstat
 
 go 1.25.0
 

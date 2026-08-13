@@ -11,8 +11,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"dirstat/internal/inventory"
-	"dirstat/internal/scan"
+	"github.com/cwedgwood/dirstat/internal/inventory"
+	"github.com/cwedgwood/dirstat/internal/scan"
 )
 
 type sortField int

@@ -11,7 +11,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"dirstat/internal/scan"
+	"github.com/cwedgwood/dirstat/internal/scan"
 )
 
 func TestProgramStartsScansAndQuits(t *testing.T) {

@@ -8,8 +8,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"dirstat/internal/inventory"
-	"dirstat/internal/scan"
+	"github.com/cwedgwood/dirstat/internal/inventory"
+	"github.com/cwedgwood/dirstat/internal/scan"
 )
 
 func TestApplyEventBuildsAndSortsTree(t *testing.T) {

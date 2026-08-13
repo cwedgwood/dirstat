@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"dirstat/internal/inventory"
+	"github.com/cwedgwood/dirstat/internal/inventory"
 )
 
 func TestResolveRootsDefaultsToWorkingDirectory(t *testing.T) {
