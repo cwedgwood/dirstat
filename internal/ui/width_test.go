@@ -10,12 +10,13 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/cwedgwood/dirstat/internal/format"
 	"github.com/cwedgwood/dirstat/internal/inventory"
 	"github.com/cwedgwood/dirstat/internal/scan"
 )
 
 // widthFixture is a directory name whose displayed width in terminal cells is
-// not its rune count. cells is the width of displayText(name), computed by
+// not its rune count. cells is the width of format.Display(name), computed by
 // hand, so a change in the escaping or measurement rules is visible here rather
 // than silently agreeing with whatever the code does.
 type widthFixture struct {
@@ -52,7 +53,7 @@ func TestFixtureDisplayWidths(t *testing.T) {
 	t.Parallel()
 
 	for _, fixture := range widthFixtures {
-		text := displayText(fixture.name)
+		text := format.Display(fixture.name)
 		if got := ansi.StringWidth(text); got != fixture.cells {
 			t.Errorf("%s: display width of %q = %d, want %d", fixture.label, text, got, fixture.cells)
 		}
@@ -127,7 +128,7 @@ func TestTruncateMeasuresCells(t *testing.T) {
 	t.Parallel()
 
 	for _, fixture := range widthFixtures {
-		text := displayText(fixture.name)
+		text := format.Display(fixture.name)
 		for limit := 1; limit <= fixture.cells+2; limit++ {
 			got := truncate(text, limit)
 			if width := ansi.StringWidth(got); width > limit {
