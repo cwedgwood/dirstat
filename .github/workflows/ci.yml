@@ -1,0 +1,161 @@
+# Actions are pinned to full commit SHAs. The trailing comments record the
+# corresponding release tags; Dependabot updates the pins.
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (go ${{ matrix.go }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ["1.24.x", "stable"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ matrix.go }}
+          check-latest: true
+      - name: go build
+        run: go build ./...
+      - name: go vet
+        run: go vet ./...
+      - name: go test
+        run: go test -count=1 ./...
+
+  race:
+    name: race
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          check-latest: true
+      - name: go test -race
+        run: go test -count=1 -race -timeout 15m ./...
+
+  gofmt:
+    name: gofmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+      - name: gofmt -l
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "these files are not gofmt-clean:" >&2
+            echo "$unformatted" >&2
+            exit 1
+          fi
+
+  modules:
+    name: modules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          check-latest: true
+      - name: go mod tidy is clean
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+      - name: go mod verify
+        run: go mod verify
+
+  staticcheck:
+    name: staticcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          check-latest: true
+      - name: install staticcheck
+        run: go install honnef.co/go/tools/cmd/staticcheck@v0.7.0
+      - name: staticcheck
+        run: staticcheck ./...
+
+  docs:
+    name: docs render
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+      - name: go doc renders for every package
+        run: |
+          for pkg in $(go list ./...); do
+            go doc "$pkg" > /dev/null
+            go doc -all "$pkg" > /dev/null
+          done
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+      - name: go test -cover
+        run: go test -count=1 -covermode=atomic -coverprofile=coverage.out ./...
+      - name: report
+        run: go tool cover -func=coverage.out | tail -n 20
+
+  crossbuild:
+    name: cross-build linux/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goarch: [arm64, "386", riscv64]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+      - name: go build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+        run: go build ./...
+      - name: go vet
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+        run: go vet ./...
+      - name: compile tests (386)
+        if: matrix.goarch == '386'
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: "386"
+        run: |
+          for pkg in $(go list ./...); do
+            output="$(printf '%s' "$pkg" | tr '/.' '__').test"
+            go test -c -o "/tmp/$output" "$pkg"
+          done

@@ -1,0 +1,15 @@
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  # Actions are pinned to immutable commit SHAs. Dependabot keeps those pins
+  # current without weakening the supply-chain guarantee.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
