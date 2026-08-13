@@ -99,6 +99,38 @@ jobs:
       - name: staticcheck
         run: staticcheck ./...
 
+  # Licensing is a release-blocking property, not cleanup: a file published
+  # without the identifier its LICENSE names is ambiguously licensed, and a
+  # check that depends on somebody remembering is not a check.
+  licensing:
+    name: licensing
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: LICENSE is verbatim Apache-2.0
+        run: |
+          want=cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30
+          got="$(sha256sum LICENSE | cut -d' ' -f1)"
+          if [ "$got" != "$want" ]; then
+            echo "LICENSE is not the verbatim Apache-2.0 text" >&2
+            echo "  got  $got" >&2
+            echo "  want $want" >&2
+            exit 1
+          fi
+      - name: every Go file carries the SPDX identifier
+        run: |
+          missing=""
+          for f in $(git ls-files '*.go'); do
+            if ! head -5 "$f" | grep -q '^// SPDX-License-Identifier: Apache-2.0$'; then
+              missing="$missing $f"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            echo "these files lack the SPDX identifier:" >&2
+            for f in $missing; do echo "  $f" >&2; done
+            exit 1
+          fi
+
   docs:
     name: docs render
     runs-on: ubuntu-latest

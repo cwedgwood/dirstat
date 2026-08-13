@@ -1,3 +1,6 @@
+// Copyright (C) 2026 Chris Wedgwood
+// SPDX-License-Identifier: Apache-2.0
+
 package inventory
 
 // Metrics contains recursively rolled-up inventory values.

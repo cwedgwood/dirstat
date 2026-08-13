@@ -88,3 +88,7 @@ errors. Press `d` to inspect error samples and exact totals.
 | `q`, `Esc`, or `Ctrl+C` | Exit                                                          |
 
 The application does not move, remove, or otherwise modify filesystem content.
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).

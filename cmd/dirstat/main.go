@@ -1,3 +1,6 @@
+// Copyright (C) 2026 Chris Wedgwood
+// SPDX-License-Identifier: Apache-2.0
+
 //go:build linux
 
 package main
