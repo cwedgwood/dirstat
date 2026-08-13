@@ -309,6 +309,63 @@ func TestTruncate(t *testing.T) {
 	}
 }
 
+// benchmarkTreeModel builds a tree whose shape and path lengths resemble a real
+// home directory: a deep prefix so every identifier is a long absolute path, a
+// wide directory holding several thousand siblings, and enough mid-level
+// directories to reach tens of thousands of nodes. Everything is expanded, so
+// visibleRows walks and orders every sibling group.
+func benchmarkTreeModel(midLevel int, midChildren int, wide int) *Model {
+	model := testModel()
+	const prefix = "/home/benchmark/workspace/checkouts/deep-directory-tree"
+
+	apply := func(id string, parentID string, name string, root bool, allocated uint64) {
+		update := scan.NodeUpdate{
+			ID:       id,
+			ParentID: parentID,
+			Path:     id,
+			Name:     name,
+			Root:     root,
+			State:    scan.StateComplete,
+			Metrics:  inventory.Metrics{Allocated: allocated, Inodes: allocated, Files: allocated},
+		}
+		model.applyEvent(scan.Event{Node: &update})
+	}
+
+	apply(prefix, "", "deep-directory-tree", true, 0)
+	wideID := prefix + "/wide-sibling-directory"
+	apply(wideID, prefix, "wide-sibling-directory", false, uint64(wide))
+	model.expanded[wideID] = true
+	for index := range wide {
+		name := fmt.Sprintf("sibling-directory-%06d", index)
+		apply(wideID+"/"+name, wideID, name, false, uint64(index%997))
+	}
+	for parentIndex := range midLevel {
+		parentName := fmt.Sprintf("project-directory-%04d", parentIndex)
+		parentID := prefix + "/" + parentName
+		apply(parentID, prefix, parentName, false, uint64(parentIndex))
+		model.expanded[parentID] = true
+		for childIndex := range midChildren {
+			childName := fmt.Sprintf("nested-source-directory-%05d", childIndex)
+			apply(parentID+"/"+childName, parentID, childName, false, uint64(childIndex%503))
+		}
+	}
+	return model
+}
+
+func BenchmarkVisibleRowsExpanded(b *testing.B) {
+	model := benchmarkTreeModel(60, 500, 4_000)
+	want := len(model.nodes)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		rows := model.visibleRows()
+		if len(rows) != want {
+			b.Fatalf("visible rows = %d, want %d", len(rows), want)
+		}
+	}
+}
+
 func BenchmarkVisibleRowsCollapsed(b *testing.B) {
 	model := testModel()
 	model.applyEvent(scan.Event{Node: &scan.NodeUpdate{

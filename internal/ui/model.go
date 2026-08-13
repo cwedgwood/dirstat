@@ -6,7 +6,7 @@ package ui
 import (
 	"context"
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -28,7 +28,7 @@ type treeNode struct {
 	state        scan.State
 	metrics      inventory.Metrics
 	errorSamples []string
-	children     []string
+	children     []*treeNode
 }
 
 type row struct {
@@ -375,7 +375,7 @@ func (m *Model) applyEvent(event scan.Event) {
 				m.rootIDs = append(m.rootIDs, update.ID)
 				m.expanded[update.ID] = true
 			} else if parent := m.nodes[update.ParentID]; parent != nil {
-				parent.children = append(parent.children, update.ID)
+				parent.children = append(parent.children, node)
 			}
 		}
 		node.state = update.State
@@ -394,51 +394,44 @@ func (m *Model) visibleRows() []row {
 	if m.filter != "" {
 		rows := make([]row, 0, initialCapacity)
 		query := strings.ToLower(m.filter)
-		for _, rootID := range m.sortedIDs(m.rootIDs) {
-			m.appendFilteredRows(&rows, rootID, 0, query)
+		for _, root := range m.sortedNodes(m.rootNodes()) {
+			m.appendFilteredRows(&rows, root, 0, query)
 		}
 		return rows
 	}
 
 	rows := make([]row, 0, initialCapacity)
-	var appendNode func(string, int)
-	appendNode = func(id string, depth int) {
-		node := m.nodes[id]
-		if node == nil {
+	var appendNode func(*treeNode, int)
+	appendNode = func(node *treeNode, depth int) {
+		rows = append(rows, row{id: node.id, depth: depth})
+		// A childless directory can never contribute rows, so skip the
+		// expansion lookup for the leaves that dominate a large tree.
+		if len(node.children) == 0 || !m.expanded[node.id] {
 			return
 		}
-		rows = append(rows, row{id: id, depth: depth})
-		if !m.expanded[id] {
-			return
-		}
-		for _, childID := range m.sortedIDs(node.children) {
-			appendNode(childID, depth+1)
+		for _, child := range m.sortedNodes(node.children) {
+			appendNode(child, depth+1)
 		}
 	}
-	for _, rootID := range m.sortedIDs(m.rootIDs) {
-		appendNode(rootID, 0)
+	for _, root := range m.sortedNodes(m.rootNodes()) {
+		appendNode(root, 0)
 	}
 	return rows
 }
 
 func (m *Model) appendFilteredRows(
 	rows *[]row,
-	id string,
+	node *treeNode,
 	depth int,
 	query string,
 ) bool {
-	node := m.nodes[id]
-	if node == nil {
-		return false
-	}
-
 	start := len(*rows)
-	*rows = append(*rows, row{id: id, depth: depth})
+	*rows = append(*rows, row{id: node.id, depth: depth})
 	selfMatches := strings.Contains(node.lowerName, query) ||
 		strings.Contains(strings.ToLower(node.path), query)
 	childMatched := false
-	for _, childID := range m.sortedIDs(node.children) {
-		if m.appendFilteredRows(rows, childID, depth+1, query) {
+	for _, child := range m.sortedNodes(node.children) {
+		if m.appendFilteredRows(rows, child, depth+1, query) {
 			childMatched = true
 		}
 	}
@@ -449,23 +442,39 @@ func (m *Model) appendFilteredRows(
 	return false
 }
 
-func (m *Model) sortedIDs(ids []string) []string {
-	sorted := append([]string(nil), ids...)
-	sort.SliceStable(sorted, func(leftIndex int, rightIndex int) bool {
-		left := m.nodes[sorted[leftIndex]]
-		right := m.nodes[sorted[rightIndex]]
-		if left == nil || right == nil {
-			return sorted[leftIndex] < sorted[rightIndex]
+// rootNodes resolves the root identifiers once per traversal. Roots are few, so
+// the map lookups here are not on the hot path that children are.
+func (m *Model) rootNodes() []*treeNode {
+	roots := make([]*treeNode, 0, len(m.rootIDs))
+	for _, rootID := range m.rootIDs {
+		if node := m.nodes[rootID]; node != nil {
+			roots = append(roots, node)
 		}
+	}
+	return roots
+}
 
+// sortedNodes orders one sibling group. Children are held as pointers so the
+// comparator dereferences rather than resolving path strings through m.nodes:
+// hashing two long absolute paths per comparison made map lookups and string
+// hashing several percent of the whole program's CPU time on a large tree.
+func (m *Model) sortedNodes(nodes []*treeNode) []*treeNode {
+	// Deep trees are full of single-child directories, and ordering one of
+	// those is a copy and a sort call for no reordering. The result is only
+	// read, so handing back the caller's slice is safe.
+	if len(nodes) < 2 {
+		return nodes
+	}
+	sorted := append([]*treeNode(nil), nodes...)
+	slices.SortStableFunc(sorted, func(left *treeNode, right *treeNode) int {
 		comparison := m.sortField.Compare(left.metrics, right.metrics)
 		if comparison == 0 {
 			comparison = strings.Compare(left.lowerName, right.lowerName)
 		}
 		if m.descending {
-			return comparison > 0
+			return -comparison
 		}
-		return comparison < 0
+		return comparison
 	})
 	return sorted
 }
