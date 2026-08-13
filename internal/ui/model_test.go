@@ -405,3 +405,54 @@ func testModel() *Model {
 		descending:  true,
 	}
 }
+
+func TestProvisionalParentRowKeepsUpdatingStatusAndSettlesDown(t *testing.T) {
+	t.Parallel()
+
+	model := testModel()
+	model.width = 120
+	model.applyEvent(scan.Event{Node: &scan.NodeUpdate{
+		ID:      "/root",
+		Path:    "/root",
+		Name:    "root",
+		Root:    true,
+		State:   scan.StateScanning,
+		Metrics: inventory.Metrics{Files: 7, Inodes: 9},
+	}})
+	model.applyEvent(scan.Event{Node: &scan.NodeUpdate{
+		ID:       "/root/child",
+		ParentID: "/root",
+		Path:     "/root/child",
+		Name:     "child",
+		State:    scan.StateScanning,
+	}})
+
+	// A parent carrying provisional descendant totals is rendered as an
+	// expandable row, so the status column is the only thing telling the user
+	// the number is still moving.
+	model.applyEvent(scan.Event{Node: &scan.NodeUpdate{
+		ID:      "/root",
+		Path:    "/root",
+		Name:    "root",
+		Root:    true,
+		State:   scan.StateScanning,
+		Metrics: inventory.Metrics{Files: 5000, Inodes: 6000},
+	}})
+	line := model.renderRow(row{id: "/root"}, model.width)
+	if !strings.Contains(line, "updating...") || !strings.Contains(line, "5.0K") {
+		t.Fatalf("provisional parent row is not marked as still updating: %q", line)
+	}
+
+	model.applyEvent(scan.Event{Node: &scan.NodeUpdate{
+		ID:      "/root",
+		Path:    "/root",
+		Name:    "root",
+		Root:    true,
+		State:   scan.StateComplete,
+		Metrics: inventory.Metrics{Files: 5000, Inodes: 4000},
+	}})
+	line = model.renderRow(row{id: "/root"}, model.width)
+	if strings.Contains(line, "updating...") || !strings.Contains(line, "4.0K") {
+		t.Fatalf("settled parent row did not adopt the deduplicated total: %q", line)
+	}
+}

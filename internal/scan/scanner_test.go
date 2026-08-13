@@ -8,6 +8,7 @@ package scan
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -457,5 +458,270 @@ func TestCancelledScanReportsCancellationWhenBufferIsFull(t *testing.T) {
 	}
 	if !foundCancelled {
 		t.Fatal("full event buffer dropped terminal cancellation state")
+	}
+}
+
+// walkExactMetrics computes the totals a scan must produce, independently of
+// the scanner and of inventory.Accumulator.
+func walkExactMetrics(t *testing.T, roots ...string) inventory.Metrics {
+	t.Helper()
+
+	metrics := inventory.Metrics{}
+	seen := make(map[inventory.InodeKey]bool)
+	charge := func(path string) {
+		var stat syscall.Stat_t
+		if err := syscall.Lstat(path, &stat); err != nil {
+			t.Fatal(err)
+		}
+		if stat.Mode&syscall.S_IFMT == syscall.S_IFDIR {
+			metrics.Directories++
+		} else {
+			metrics.Files++
+		}
+		key := inventory.InodeKey{Device: uint64(stat.Dev), Inode: stat.Ino}
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		metrics.Inodes++
+		if stat.Blocks > 0 {
+			metrics.Allocated += uint64(stat.Blocks) * 512
+		}
+		if stat.Size > 0 {
+			metrics.Apparent += uint64(stat.Size)
+		}
+	}
+
+	for _, root := range roots {
+		charge(root)
+		err := filepath.WalkDir(root, func(path string, _ fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if path != root {
+				charge(path)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	return metrics
+}
+
+// makeChain creates a chain of nested directories so that its topmost
+// directory stays unfinished for as long as the chain takes to walk.
+func makeChain(t *testing.T, path string, depth int) {
+	t.Helper()
+
+	for range depth {
+		if err := os.Mkdir(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		path = filepath.Join(path, "next")
+	}
+}
+
+func collectEvents(t *testing.T, roots []Root, options Options) []Event {
+	t.Helper()
+
+	events := make([]Event, 0, 1024)
+	for event := range Start(context.Background(), roots, options) {
+		events = append(events, event)
+	}
+	return events
+}
+
+func TestAncestorsAccumulateBeforeSubtreesComplete(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	const branches = 4
+	for index := range branches {
+		branch := filepath.Join(root, fmt.Sprintf("branch-%d", index))
+		makeChain(t, branch, 120)
+		if err := os.WriteFile(filepath.Join(branch, "file"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	roots, err := ResolveRoots([]string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := collectEvents(t, roots, Options{
+		Workers:         2,
+		refreshInterval: 100 * time.Microsecond,
+	})
+
+	provisional := 0
+	sawBranchComplete := false
+	earlyProvisional := false
+	var final Event
+	for _, event := range events {
+		if event.Done {
+			final = event
+		}
+		node := event.Node
+		if node == nil {
+			continue
+		}
+		if node.Path != root {
+			if node.State == StateComplete && filepath.Dir(node.Path) == root {
+				sawBranchComplete = true
+			}
+			continue
+		}
+		if node.State != StateScanning || node.Metrics.Files == 0 {
+			continue
+		}
+		provisional++
+		if !sawBranchComplete {
+			earlyProvisional = true
+		}
+	}
+
+	// The old child-count throttle refreshed a parent only after every 64th
+	// completed child, so a four-child root received nothing at all here.
+	if provisional == 0 {
+		t.Fatal("root received no provisional roll-up while its subtrees were scanned")
+	}
+	if !earlyProvisional {
+		t.Fatal("root roll-ups only appeared after a whole branch had completed")
+	}
+	if want := walkExactMetrics(t, root); final.Summary != want {
+		t.Fatalf("summary = %+v, want %+v", final.Summary, want)
+	}
+}
+
+func TestProvisionalRollUpOverCountsHardLinksThenSettles(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	first := filepath.Join(root, "first")
+	second := filepath.Join(root, "second")
+	makeChain(t, first, 150)
+	makeChain(t, second, 150)
+
+	shared := filepath.Join(first, "shared")
+	file, err := os.Create(shared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Sparse, so the duplicated apparent size dwarfs everything else in the
+	// tree without writing megabytes.
+	if err := file.Truncate(64 << 20); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(shared, filepath.Join(second, "shared-link")); err != nil {
+		t.Fatal(err)
+	}
+
+	roots, err := ResolveRoots([]string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := collectEvents(t, roots, Options{
+		Workers:         2,
+		refreshInterval: 100 * time.Microsecond,
+	})
+
+	var rootFinal NodeUpdate
+	overCounted := false
+	peak := uint64(0)
+	for _, event := range events {
+		if event.Node == nil || event.Node.Path != root {
+			continue
+		}
+		if event.Node.State == StateComplete {
+			rootFinal = *event.Node
+		}
+		peak = max(peak, event.Node.Metrics.Apparent)
+	}
+	if rootFinal.Path == "" {
+		t.Fatal("root never completed")
+	}
+	overCounted = peak > rootFinal.Metrics.Apparent
+	if !overCounted {
+		t.Fatalf(
+			"provisional roll-up never exceeded the deduplicated total (peak %d, final %d)",
+			peak,
+			rootFinal.Metrics.Apparent,
+		)
+	}
+	if want := walkExactMetrics(t, root); rootFinal.Metrics != want {
+		t.Fatalf("root metrics = %+v, want %+v", rootFinal.Metrics, want)
+	}
+}
+
+func TestFinalTotalsExactWithHardLinksAcrossSiblingsAndRoots(t *testing.T) {
+	t.Parallel()
+
+	parent := t.TempDir()
+	alpha := filepath.Join(parent, "alpha")
+	beta := filepath.Join(parent, "beta")
+	alphaInner := filepath.Join(alpha, "inner")
+	betaInner := filepath.Join(beta, "inner")
+	for _, path := range []string{alpha, beta, alphaInner, betaInner} {
+		if err := os.Mkdir(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	shared := filepath.Join(alphaInner, "shared")
+	if err := os.WriteFile(shared, make([]byte, 40960), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// One inode reachable from a sibling directory, a sibling subtree, and a
+	// second scan root.
+	for _, link := range []string{
+		filepath.Join(alpha, "sibling-link"),
+		filepath.Join(betaInner, "cousin-link"),
+		filepath.Join(beta, "root-link"),
+	} {
+		if err := os.Link(shared, link); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	singleRoot, err := ResolveRoots([]string{parent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodes := make(map[string]NodeUpdate)
+	var final Event
+	for _, event := range collectEvents(t, singleRoot, Options{Workers: 3}) {
+		if event.Node != nil && event.Node.State == StateComplete {
+			nodes[event.Node.Path] = *event.Node
+		}
+		if event.Done {
+			final = event
+		}
+	}
+	if want := walkExactMetrics(t, parent); final.Summary != want {
+		t.Fatalf("single-root summary = %+v, want %+v", final.Summary, want)
+	}
+	for _, path := range []string{alpha, beta, alphaInner, betaInner} {
+		if want := walkExactMetrics(t, path); nodes[path].Metrics != want {
+			t.Fatalf("%s metrics = %+v, want %+v", path, nodes[path].Metrics, want)
+		}
+	}
+
+	splitRoots, err := ResolveRoots([]string{alpha, beta})
+	if err != nil {
+		t.Fatal(err)
+	}
+	final = Event{}
+	for _, event := range collectEvents(t, splitRoots, Options{Workers: 3}) {
+		if event.Done {
+			final = event
+		}
+	}
+	if want := walkExactMetrics(t, alpha, beta); final.Summary != want {
+		t.Fatalf("multi-root summary = %+v, want %+v", final.Summary, want)
 	}
 }
