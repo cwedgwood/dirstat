@@ -7,25 +7,15 @@ import (
 	"context"
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/cwedgwood/dirstat/internal/format"
 	"github.com/cwedgwood/dirstat/internal/inventory"
 	"github.com/cwedgwood/dirstat/internal/scan"
-)
-
-type sortField int
-
-const (
-	sortAllocated sortField = iota
-	sortInodes
-	sortFiles
-	sortApparent
-	sortName
 )
 
 type treeNode struct {
@@ -81,8 +71,8 @@ type Model struct {
 	cursor int
 	offset int
 
-	sortField  sortField
-	sortChoice sortField
+	sortField  inventory.SortField
+	sortChoice inventory.SortField
 	descending bool
 	selectSort bool
 	filter     string
@@ -107,7 +97,7 @@ func New(
 		roots:         roots,
 		scanOptions:   scanOptions,
 		options:       options,
-		sortField:     sortAllocated,
+		sortField:     inventory.SortAllocated,
 		descending:    true,
 		selectedStyle: lipgloss.NewStyle().Reverse(true),
 		activeStyle:   lipgloss.NewStyle().Foreground(lipgloss.Color("6")),
@@ -250,19 +240,19 @@ func (m *Model) handleKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.applySortChoice(m.sortChoice)
 			m.selectSort = false
 		case "a":
-			m.applySortChoice(sortAllocated)
+			m.applySortChoice(inventory.SortAllocated)
 			m.selectSort = false
 		case "i":
-			m.applySortChoice(sortInodes)
+			m.applySortChoice(inventory.SortInodes)
 			m.selectSort = false
 		case "f":
-			m.applySortChoice(sortFiles)
+			m.applySortChoice(inventory.SortFiles)
 			m.selectSort = false
 		case "p":
-			m.applySortChoice(sortApparent)
+			m.applySortChoice(inventory.SortApparent)
 			m.selectSort = false
 		case "n":
-			m.applySortChoice(sortName)
+			m.applySortChoice(inventory.SortName)
 			m.selectSort = false
 		}
 		return m, nil
@@ -467,19 +457,7 @@ func (m *Model) sortedIDs(ids []string) []string {
 			return sorted[leftIndex] < sorted[rightIndex]
 		}
 
-		comparison := 0
-		switch m.sortField {
-		case sortAllocated:
-			comparison = compareUint64(left.metrics.Allocated, right.metrics.Allocated)
-		case sortInodes:
-			comparison = compareUint64(left.metrics.Inodes, right.metrics.Inodes)
-		case sortFiles:
-			comparison = compareUint64(left.metrics.Files, right.metrics.Files)
-		case sortApparent:
-			comparison = compareUint64(left.metrics.Apparent, right.metrics.Apparent)
-		case sortName:
-			comparison = strings.Compare(left.lowerName, right.lowerName)
-		}
+		comparison := m.sortField.Compare(left.metrics, right.metrics)
 		if comparison == 0 {
 			comparison = strings.Compare(left.lowerName, right.lowerName)
 		}
@@ -506,12 +484,12 @@ func (m *Model) renderStatus(width int) string {
 	line := fmt.Sprintf(
 		"dirstat | %s | dirs %s/%s | skipped %s | active %s | queued %s | errors %s",
 		state,
-		formatCount(m.progress.Scanned),
-		formatCount(m.progress.Discovered),
-		formatCount(m.progress.Skipped),
-		formatCount(m.progress.Active),
-		formatCount(m.progress.Queued),
-		formatCount(m.progress.Errors),
+		format.Count(m.progress.Scanned),
+		format.Count(m.progress.Discovered),
+		format.Count(m.progress.Skipped),
+		format.Count(m.progress.Active),
+		format.Count(m.progress.Queued),
+		format.Count(m.progress.Errors),
 	)
 	if !m.options.NoColor {
 		if m.progress.Errors > 0 {
@@ -529,7 +507,7 @@ func (m *Model) renderSortAndFilter(width int) string {
 	if !m.descending {
 		direction = "asc"
 	}
-	line := fmt.Sprintf("sort: %s %s", m.sortFieldName(), direction)
+	line := fmt.Sprintf("sort: %s %s", m.sortField, direction)
 	if m.filter != "" {
 		line += fmt.Sprintf(" | filter: %q", m.filter)
 	}
@@ -539,17 +517,17 @@ func (m *Model) renderSortAndFilter(width int) string {
 func (m *Model) renderSortPicker(width int) string {
 	options := []struct {
 		key   string
-		field sortField
+		field inventory.SortField
 	}{
-		{key: "a", field: sortAllocated},
-		{key: "i", field: sortInodes},
-		{key: "f", field: sortFiles},
-		{key: "p", field: sortApparent},
-		{key: "n", field: sortName},
+		{key: "a", field: inventory.SortAllocated},
+		{key: "i", field: inventory.SortInodes},
+		{key: "f", field: inventory.SortFiles},
+		{key: "p", field: inventory.SortApparent},
+		{key: "n", field: inventory.SortName},
 	}
 	parts := make([]string, 0, len(options))
 	for _, option := range options {
-		label := option.key + ":" + sortFieldName(option.field)
+		label := option.key + ":" + option.field.String()
 		if option.field == m.sortChoice {
 			label = "[" + label + "]"
 		}
@@ -604,7 +582,7 @@ func (m *Model) renderRow(item row, width int) string {
 	} else if node.state == scan.StateAlias {
 		marker = "[a]"
 	}
-	name := strings.Repeat("  ", item.depth) + marker + " " + displayText(node.name)
+	name := strings.Repeat("  ", item.depth) + marker + " " + format.Display(node.name)
 	if node.state == scan.StatePartial {
 		name += " !"
 	}
@@ -620,9 +598,9 @@ func (m *Model) renderRow(item row, width int) string {
 			nameWidth,
 			truncate(name, nameWidth),
 			status,
-			formatCount(node.metrics.Files),
-			formatCount(node.metrics.Inodes),
-			formatBytes(node.metrics.Allocated),
+			format.Count(node.metrics.Files),
+			format.Count(node.metrics.Inodes),
+			format.Bytes(node.metrics.Allocated),
 		)
 	}
 	nameWidth := max(8, width-55)
@@ -631,10 +609,10 @@ func (m *Model) renderRow(item row, width int) string {
 		nameWidth,
 		truncate(name, nameWidth),
 		status,
-		formatCount(node.metrics.Files),
-		formatCount(node.metrics.Inodes),
-		formatBytes(node.metrics.Allocated),
-		formatBytes(node.metrics.Apparent),
+		format.Count(node.metrics.Files),
+		format.Count(node.metrics.Inodes),
+		format.Bytes(node.metrics.Allocated),
+		format.Bytes(node.metrics.Apparent),
 	)
 }
 
@@ -650,7 +628,7 @@ func (m *Model) renderDetails(width int, rows []row) []string {
 	lines := []string{
 		truncate(fmt.Sprintf(
 			"path: %s | state: %s | dirs: %d | files: %d | inodes: %d",
-			displayText(node.path),
+			format.Display(node.path),
 			node.state,
 			node.metrics.Directories,
 			node.metrics.Files,
@@ -668,7 +646,7 @@ func (m *Model) renderDetails(width int, rows []row) []string {
 		sampleLabel = "note"
 	}
 	for _, sample := range node.errorSamples {
-		lines = append(lines, truncate(sampleLabel+": "+displayText(sample), width))
+		lines = append(lines, truncate(sampleLabel+": "+format.Display(sample), width))
 	}
 	return lines
 }
@@ -700,7 +678,7 @@ func (m *Model) restoreSelection(rows []row, selectedID string) {
 	m.clampCursor(rows)
 }
 
-func (m *Model) applySortChoice(field sortField) {
+func (m *Model) applySortChoice(field inventory.SortField) {
 	rows := m.visibleRows()
 	selectedID := m.selectedID(rows)
 	m.sortField = field
@@ -749,34 +727,13 @@ func (m *Model) pageStep(rows []row) int {
 	return max(1, available-1)
 }
 
-func (m *Model) sortFieldName() string {
-	return sortFieldName(m.sortField)
+func nextSortField(field inventory.SortField) inventory.SortField {
+	return (field + 1) % (inventory.SortName + 1)
 }
 
-func sortFieldName(field sortField) string {
-	switch field {
-	case sortAllocated:
-		return "allocated"
-	case sortInodes:
-		return "inodes"
-	case sortFiles:
-		return "files"
-	case sortApparent:
-		return "apparent"
-	case sortName:
-		return "name"
-	default:
-		return "unknown"
-	}
-}
-
-func nextSortField(field sortField) sortField {
-	return (field + 1) % (sortName + 1)
-}
-
-func previousSortField(field sortField) sortField {
-	if field == sortAllocated {
-		return sortName
+func previousSortField(field inventory.SortField) inventory.SortField {
+	if field == inventory.SortAllocated {
+		return inventory.SortName
 	}
 	return field - 1
 }
@@ -785,44 +742,6 @@ func waitForEvent(channel <-chan scan.Event) tea.Cmd {
 	return func() tea.Msg {
 		event, ok := <-channel
 		return scanEventMsg{event: event, channel: channel, ok: ok}
-	}
-}
-
-func compareUint64(left uint64, right uint64) int {
-	switch {
-	case left < right:
-		return -1
-	case left > right:
-		return 1
-	default:
-		return 0
-	}
-}
-
-func formatBytes(value uint64) string {
-	const unit = 1024
-	if value < unit {
-		return fmt.Sprintf("%dB", value)
-	}
-	divisor := uint64(unit)
-	exponent := 0
-	for quotient := value / unit; quotient >= unit && exponent < 5; quotient /= unit {
-		divisor *= unit
-		exponent++
-	}
-	return fmt.Sprintf("%.1f%ciB", float64(value)/float64(divisor), "KMGTPE"[exponent])
-}
-
-func formatCount(value uint64) string {
-	switch {
-	case value >= 1_000_000_000:
-		return fmt.Sprintf("%.1fB", float64(value)/1_000_000_000)
-	case value >= 1_000_000:
-		return fmt.Sprintf("%.1fM", float64(value)/1_000_000)
-	case value >= 1_000:
-		return fmt.Sprintf("%.1fK", float64(value)/1_000)
-	default:
-		return fmt.Sprintf("%d", value)
 	}
 }
 
@@ -846,9 +765,4 @@ func trimLastRune(value string) string {
 	}
 	_, size := utf8.DecodeLastRuneInString(value)
 	return value[:len(value)-size]
-}
-
-func displayText(value string) string {
-	quoted := strconv.QuoteToGraphic(value)
-	return quoted[1 : len(quoted)-1]
 }

@@ -179,7 +179,7 @@ func TestSortPickerSelectsInodes(t *testing.T) {
 	}
 	model.handleKey(tea.KeyMsg{Type: tea.KeyDown})
 	model.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
-	if model.sortField != sortInodes || model.selectSort {
+	if model.sortField != inventory.SortInodes || model.selectSort {
 		t.Fatalf("sort selection = %v, open = %t; want inodes and closed", model.sortField, model.selectSort)
 	}
 	rows := model.visibleRows()
@@ -272,15 +272,6 @@ func TestFilterCtrlCQuits(t *testing.T) {
 	}
 }
 
-func TestDisplayTextEscapesTerminalControls(t *testing.T) {
-	t.Parallel()
-
-	got := displayText("line\n\x1b[2J")
-	if got != `line\n\x1b[2J` {
-		t.Fatalf("displayText = %q", got)
-	}
-}
-
 func TestRenderRowShowsUpdatingStatusBeforeFiles(t *testing.T) {
 	t.Parallel()
 
@@ -310,15 +301,9 @@ func TestRenderRowShowsUpdatingStatusBeforeFiles(t *testing.T) {
 	}
 }
 
-func TestFormatting(t *testing.T) {
+func TestTruncate(t *testing.T) {
 	t.Parallel()
 
-	if got := formatBytes(1536); got != "1.5KiB" {
-		t.Fatalf("formatBytes(1536) = %q", got)
-	}
-	if got := formatCount(1_250_000); got != "1.2M" {
-		t.Fatalf("formatCount(1250000) = %q", got)
-	}
 	if got := truncate("abcdef", 5); got != "ab..." {
 		t.Fatalf("truncate = %q", got)
 	}
@@ -401,7 +386,7 @@ func testModel() *Model {
 		baseContext: context,
 		nodes:       make(map[string]*treeNode),
 		expanded:    make(map[string]bool),
-		sortField:   sortAllocated,
+		sortField:   inventory.SortAllocated,
 		descending:  true,
 	}
 }
