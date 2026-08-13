@@ -498,3 +498,186 @@ func TestProvisionalParentRowKeepsUpdatingStatusAndSettlesDown(t *testing.T) {
 		t.Fatalf("settled parent row did not adopt the deduplicated total: %q", line)
 	}
 }
+
+func nodeEvent(path string, parent string, allocated uint64) scan.Event {
+	name := path[strings.LastIndex(path, "/")+1:]
+	return scan.Event{Node: &scan.NodeUpdate{
+		ID:       path,
+		ParentID: parent,
+		Path:     path,
+		Name:     name,
+		Root:     parent == "",
+		State:    scan.StateComplete,
+		Metrics:  inventory.Metrics{Allocated: allocated},
+	}}
+}
+
+// feedEvents drives one batch through Update the way the Bubble Tea loop does,
+// so the incremental arrival of nodes is exercised rather than bypassed.
+func feedEvents(t *testing.T, model *Model, events ...scan.Event) {
+	t.Helper()
+
+	channel := make(chan scan.Event, len(events))
+	for _, event := range events[1:] {
+		channel <- event
+	}
+	model.events = channel
+	model.Update(scanEventMsg{event: events[0], channel: channel, ok: true})
+}
+
+func buildTree(t *testing.T, model *Model) {
+	t.Helper()
+
+	feedEvents(t, model,
+		nodeEvent("/root", "", 300),
+		nodeEvent("/root/keep", "/root", 200),
+		nodeEvent("/root/keep/deep", "/root/keep", 100),
+		nodeEvent("/root/other", "/root", 1),
+	)
+}
+
+func selectPath(t *testing.T, model *Model, path string) {
+	t.Helper()
+
+	for index, item := range model.visibleRows() {
+		if item.id == path {
+			model.cursor = index
+			return
+		}
+	}
+	t.Fatalf("%s is not a visible row", path)
+}
+
+func TestRescanRestoresSelectionAndExpansion(t *testing.T) {
+	t.Parallel()
+
+	model := testModel()
+	buildTree(t, model)
+	model.expanded["/root/keep"] = true
+	selectPath(t, model, "/root/keep/deep")
+
+	model.restart()
+	if model.cursor != 0 {
+		t.Fatalf("cursor = %d immediately after restart, want the top of the empty tree", model.cursor)
+	}
+
+	// The target cannot exist when the root arrives, so the restore has to
+	// survive until its own event turns up.
+	feedEvents(t, model, nodeEvent("/root", "", 300))
+	if got := model.selectedID(model.visibleRows()); got != "/root" {
+		t.Fatalf("selection = %q before the target reappeared, want the root", got)
+	}
+	feedEvents(t, model,
+		nodeEvent("/root/keep", "/root", 200),
+		nodeEvent("/root/other", "/root", 1),
+		nodeEvent("/root/keep/deep", "/root/keep", 100),
+	)
+
+	if got := model.selectedID(model.visibleRows()); got != "/root/keep/deep" {
+		t.Fatalf("selection after rescan = %q, want /root/keep/deep", got)
+	}
+	if !model.expanded["/root/keep"] {
+		t.Fatal("expansion of /root/keep was not restored")
+	}
+
+	// A restored deep cursor must be scrolled into view, not left below the
+	// visible window.
+	model.offset = 0
+	model.adjustOffset(len(model.visibleRows()), 2)
+	if model.cursor < model.offset || model.cursor >= model.offset+2 {
+		t.Fatalf("restored cursor %d is outside the visible window at offset %d", model.cursor, model.offset)
+	}
+}
+
+func TestRescanFallsBackToSurvivingAncestor(t *testing.T) {
+	t.Parallel()
+
+	model := testModel()
+	buildTree(t, model)
+	model.expanded["/root/keep"] = true
+	selectPath(t, model, "/root/keep/deep")
+
+	model.restart()
+	feedEvents(t, model,
+		nodeEvent("/root", "", 200),
+		nodeEvent("/root/other", "/root", 1),
+		nodeEvent("/root/keep", "/root", 100),
+		scan.Event{Done: true},
+	)
+
+	if got := model.selectedID(model.visibleRows()); got != "/root/keep" {
+		t.Fatalf("selection after the target was deleted = %q, want the surviving parent", got)
+	}
+	if model.restorePath != "" || model.restoreID != "" || model.restoreExpanded != nil {
+		t.Fatalf(
+			"restore state outlived the scan: path=%q id=%q expanded=%v",
+			model.restorePath,
+			model.restoreID,
+			model.restoreExpanded,
+		)
+	}
+}
+
+func TestRescanDoesNotAccumulateStaleExpansion(t *testing.T) {
+	t.Parallel()
+
+	model := testModel()
+	buildTree(t, model)
+	for _, id := range []string{"/root/keep", "/root/keep/deep", "/root/other"} {
+		model.expanded[id] = true
+	}
+	selectPath(t, model, "/root/keep/deep")
+
+	// Every rescan finds one directory fewer. Nothing may be carried forward
+	// for a path the scan no longer reports.
+	for round := range 3 {
+		model.restart()
+		events := []scan.Event{nodeEvent("/root", "", 100)}
+		if round == 0 {
+			events = append(events, nodeEvent("/root/keep", "/root", 50))
+		}
+		events = append(events, scan.Event{Done: true})
+		feedEvents(t, model, events...)
+
+		if _, stale := model.expanded["/root/keep/deep"]; stale {
+			t.Fatalf("round %d resurrected expansion for a path the scan did not report", round)
+		}
+		if len(model.expanded) > len(model.nodes) {
+			t.Fatalf(
+				"round %d: expansion entries %d exceed live nodes %d",
+				round,
+				len(model.expanded),
+				len(model.nodes),
+			)
+		}
+		if model.restoreExpanded != nil {
+			t.Fatalf("round %d left %d carried expansion paths behind", round, len(model.restoreExpanded))
+		}
+	}
+	if got := model.selectedID(model.visibleRows()); got != "/root" {
+		t.Fatalf("selection = %q once only the root survives, want /root", got)
+	}
+}
+
+func TestNavigationDuringRescanCancelsRestore(t *testing.T) {
+	t.Parallel()
+
+	model := testModel()
+	buildTree(t, model)
+	model.expanded["/root/keep"] = true
+	selectPath(t, model, "/root/keep/deep")
+
+	model.restart()
+	feedEvents(t, model,
+		nodeEvent("/root", "", 300),
+		nodeEvent("/root/keep", "/root", 200),
+		nodeEvent("/root/other", "/root", 1),
+	)
+	model.handleKey(tea.KeyMsg{Type: tea.KeyDown})
+	moved := model.selectedID(model.visibleRows())
+
+	feedEvents(t, model, nodeEvent("/root/keep/deep", "/root/keep", 100))
+	if got := model.selectedID(model.visibleRows()); got != moved {
+		t.Fatalf("restore moved the cursor from %q to %q after the user navigated", moved, got)
+	}
+}

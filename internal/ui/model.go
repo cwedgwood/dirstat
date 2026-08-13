@@ -62,6 +62,13 @@ type Model struct {
 	rootIDs  []string
 	expanded map[string]bool
 
+	// Pre-rescan view state, matched against the new tree by absolute path as
+	// it is discovered. restorePath is the directory that was selected,
+	// restoreID the best node found for it so far.
+	restoreExpanded map[string]bool
+	restorePath     string
+	restoreID       string
+
 	progress  scan.Progress
 	summary   inventory.Metrics
 	done      bool
@@ -138,6 +145,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.cancelled = true
 			}
 			m.done = true
+			m.clearRestore()
 			return m, nil
 		}
 
@@ -162,8 +170,9 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				break drain
 			}
 		}
-		m.restoreSelection(m.visibleRows(), selectedID)
+		m.restoreSelection(m.visibleRows(), m.takeRestoreTarget(selectedID))
 		if finished {
+			m.clearRestore()
 			return m, nil
 		}
 		return m, waitForEvent(m.events)
@@ -287,6 +296,11 @@ func (m *Model) handleKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	rows := m.visibleRows()
+	if movesCursor(message.String()) {
+		// The user is navigating again, so a restore still waiting on deeper
+		// nodes must stop pulling the cursor out from under them.
+		m.clearRestore()
+	}
 	switch message.String() {
 	case "q", "esc", "ctrl+c":
 		m.Close()
@@ -338,10 +352,17 @@ func (m *Model) handleKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// restart cancels any running scan and starts a fresh one. Deliberate view
+// state survives it: sort, filter, columns and details already did, and so now
+// do the expanded directories and the selected path, because a rescan is
+// normally a check on a directory the user has already drilled down to.
 func (m *Model) restart() {
 	if m.cancelScan != nil {
 		m.cancelScan()
 	}
+	m.restoreExpanded = m.expandedPaths()
+	m.restorePath = m.selectedPath()
+	m.restoreID = ""
 	m.scanContext, m.cancelScan = context.WithCancel(m.baseContext)
 	m.events = scan.Start(m.scanContext, m.roots, m.scanOptions)
 	m.nodes = make(map[string]*treeNode)
@@ -377,6 +398,7 @@ func (m *Model) applyEvent(event scan.Event) {
 			} else if parent := m.nodes[update.ParentID]; parent != nil {
 				parent.children = append(parent.children, node)
 			}
+			m.noteRestoredNode(node)
 		}
 		node.state = update.State
 		node.metrics = update.Metrics
@@ -682,6 +704,106 @@ func (m *Model) restoreSelection(rows []row, selectedID string) {
 		}
 	}
 	m.clampCursor(rows)
+}
+
+func (m *Model) selectedPath() string {
+	if node := m.selectedNode(m.visibleRows()); node != nil {
+		return node.path
+	}
+	return ""
+}
+
+// expandedPaths snapshots the open directories by absolute path, the only key
+// that survives a rebuild of the tree. Collapsed entries are dropped: collapsed
+// is the default, so keeping them would only hold paths the next scan may never
+// mention.
+func (m *Model) expandedPaths() map[string]bool {
+	paths := make(map[string]bool, len(m.expanded))
+	for id, open := range m.expanded {
+		if !open {
+			continue
+		}
+		if node := m.nodes[id]; node != nil {
+			paths[node.path] = true
+		}
+	}
+	if len(paths) == 0 {
+		return nil
+	}
+	return paths
+}
+
+// noteRestoredNode offers a newly discovered node the pre-rescan view state.
+// This cannot be done once at restart time: the tree arrives incrementally, so
+// when the scan begins the previously selected directory does not exist yet,
+// and if it was just deleted it never will.
+func (m *Model) noteRestoredNode(node *treeNode) {
+	if m.restoreExpanded[node.path] {
+		m.expanded[node.id] = true
+		delete(m.restoreExpanded, node.path)
+	}
+	if m.restorePath == "" {
+		return
+	}
+	switch {
+	case node.path == m.restorePath:
+		m.restoreID = node.id
+		m.restorePath = ""
+	case isAncestorPath(node.path, m.restorePath):
+		// Track the deepest surviving ancestor as the fallback. The usual
+		// reason a rescan cannot find the selected directory is that the user
+		// just deleted it, and its parent is where the freed space shows up.
+		// Ancestors are expanded so that fallback is on screen even if the
+		// user reached the directory through a filter rather than by opening
+		// every level.
+		m.expanded[node.id] = true
+		if current := m.nodes[m.restoreID]; current == nil || len(node.path) > len(current.path) {
+			m.restoreID = node.id
+		}
+	}
+}
+
+// takeRestoreTarget picks what the cursor should follow after a batch of
+// events: a pending restore outranks the row the user is sitting on, which
+// after a restart is only the top of a tree they did not ask to return to.
+func (m *Model) takeRestoreTarget(selectedID string) string {
+	if m.restoreID == "" {
+		return selectedID
+	}
+	target := m.restoreID
+	if m.restorePath == "" {
+		// The directory itself came back, so the restore is finished and later
+		// events must not keep re-seeking the cursor.
+		m.restoreID = ""
+	}
+	return target
+}
+
+// clearRestore drops pre-rescan state. Paths the completed scan never produced
+// no longer exist, and keeping them would leak one entry per deleted directory
+// across repeated rescans of trees with millions of them.
+func (m *Model) clearRestore() {
+	m.restoreExpanded = nil
+	m.restorePath = ""
+	m.restoreID = ""
+}
+
+// isAncestorPath reports whether ancestor is a proper path prefix of path.
+func isAncestorPath(ancestor string, path string) bool {
+	if ancestor == "/" {
+		return len(path) > 1 && path[0] == '/'
+	}
+	return len(path) > len(ancestor) &&
+		path[len(ancestor)] == '/' &&
+		strings.HasPrefix(path, ancestor)
+}
+
+func movesCursor(key string) bool {
+	switch key {
+	case "up", "k", "down", "j", "pgup", "pgdown", "left", "h", "right", "l", "enter", "/":
+		return true
+	}
+	return false
 }
 
 func (m *Model) applySortChoice(field inventory.SortField) {
