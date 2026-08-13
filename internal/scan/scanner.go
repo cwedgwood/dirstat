@@ -12,7 +12,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"syscall"
 
@@ -118,9 +117,29 @@ type Event struct {
 	Summary   inventory.Metrics
 }
 
-// DefaultWorkers returns a conservative amount of metadata concurrency.
+// DefaultWorkers returns the number of directories to read concurrently.
+//
+// This deliberately does not scale with the CPU count. The work is dominated by
+// waiting on filesystem metadata, not by computation, so the useful amount of
+// concurrency is set by how many metadata operations the storage will overlap,
+// which has nothing to do with how many cores are available to issue them.
+//
+// Measured on a 3.16M inode ZFS home directory, 8 cores / 16 threads, warm ARC:
+//
+//	workers   4    62.2s
+//	workers   8    24.6s
+//	workers  16    11.3s
+//	workers  32     8.6s
+//	workers  64     9.4s
+//
+// Scaling is super-linear to 16 and still improving at 32, which is what a
+// latency-bound workload looks like; 64 gives it back. Tying this to
+// GOMAXPROCS, as it used to, chose 8 workers on a 4-thread machine and was
+// therefore about three times slower than necessary on identical storage.
+//
+// Override with --workers where the storage differs enough to matter.
 func DefaultWorkers() int {
-	return min(32, max(4, runtime.GOMAXPROCS(0)*2))
+	return 32
 }
 
 // ResolveRoots normalizes, validates, and opens scan roots.
