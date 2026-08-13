@@ -29,6 +29,29 @@ make build
 
 This creates `./dirstat`.
 
+## Version
+
+```sh
+dirstat --version
+```
+
+`--version` prints what the binary knows about its own build and exits without
+scanning anything, so it is safe to redirect or pipe:
+
+```
+dirstat v0.4.0
+commit:    3425e45f5202b1c1d8c8ca26f86cc7f7b76b6ec4
+committed: 2026-08-13T07:19:26Z
+go:        go1.25.0
+platform:  linux/amd64
+```
+
+A released binary reports the tag it was built from and that tag's commit. A `go install` build
+reports the module version the `go` command resolved, and has no commit or commit time to report, so
+those lines are omitted rather than filled in with something invented. A build from a working tree
+reports whatever the toolchain recorded, with `(modified)` after the commit when the tree had
+uncommitted changes.
+
 ## Run
 
 ```sh
@@ -41,7 +64,7 @@ dirstat --cross-filesystems /
 
 With no path, the current working directory is scanned. Scan roots must be directories and may not
 overlap. Without `--top` the interactive tree is shown; see [Ranked list](#ranked-list) for
-non-interactive output.
+non-interactive output. `dirstat --help` lists every flag.
 
 By default, traversal stays on the filesystem containing each scan root.  Mounted directories are
 counted and marked `[m]`, but their contents are not read. `--cross-filesystems` disables that

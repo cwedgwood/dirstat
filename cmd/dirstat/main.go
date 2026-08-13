@@ -9,6 +9,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -19,47 +20,107 @@ import (
 	"github.com/cwedgwood/dirstat/internal/ui"
 )
 
+// options are the parsed command line, gathered so the flag surface can be
+// declared once and inspected by tests without a real command line.
+type options struct {
+	workers          int
+	crossFilesystems bool
+	noColor          bool
+	top              int
+	sortName         string
+	exact            bool
+	version          bool
+}
+
+func newFlagSet(name string, out io.Writer, opts *options) *flag.FlagSet {
+	flags := flag.NewFlagSet(name, flag.ExitOnError)
+	flags.SetOutput(out)
+	flags.IntVar(
+		&opts.workers,
+		"workers",
+		scan.DefaultWorkers(),
+		"maximum number of directories scanned concurrently",
+	)
+	flags.BoolVar(
+		&opts.crossFilesystems,
+		"cross-filesystems",
+		false,
+		"descend into mounted filesystems",
+	)
+	flags.BoolVar(
+		&opts.noColor,
+		"no-color",
+		false,
+		"disable color and terminal styling in the interactive tree; ranked --top output is never styled",
+	)
+	flags.IntVar(
+		&opts.top,
+		"top",
+		0,
+		"print the N largest directories and exit instead of starting the interactive tree; --top 0 prints every directory",
+	)
+	flags.StringVar(
+		&opts.sortName,
+		"sort",
+		inventory.SortAllocated.String(),
+		"metric that ranks --top output: allocated, inodes, files, apparent, or name",
+	)
+	flags.BoolVar(
+		&opts.exact,
+		"exact",
+		false,
+		"print unscaled numbers in --top output instead of scaled units",
+	)
+	flags.BoolVar(&opts.version, "version", false, "print version information and exit")
+	flags.Usage = func() { usage(flags) }
+	return flags
+}
+
+func usage(flags *flag.FlagSet) {
+	out := flags.Output()
+	fmt.Fprintf(out, "Usage: %s [flags] [PATH...]\n\n", flags.Name())
+	fmt.Fprint(out, `Scan the current directory by default, or one or more explicit directories.
+Roots must be directories and may not overlap. Symbolic links are inventoried
+but never followed, and traversal stays on the filesystem holding each root
+unless --cross-filesystems is given.
+
+Without --top an interactive tree is shown. With --top a ranked list of the
+directories holding the most of one metric is written to standard output and
+dirstat exits; that list is plain text, so it can be redirected or piped.
+--sort and --exact apply to --top output only.
+
+The exit status is 0 when the scan completed, 1 when it did not, and 2 for a
+usage error.
+
+Flags:
+`)
+	flags.PrintDefaults()
+}
+
 func main() {
 	os.Exit(run())
 }
 
 func run() int {
-	workers := flag.Int(
-		"workers",
-		scan.DefaultWorkers(),
-		"maximum number of directories scanned concurrently",
-	)
-	crossFilesystems := flag.Bool(
-		"cross-filesystems",
-		false,
-		"descend into mounted filesystems",
-	)
-	noColor := flag.Bool("no-color", false, "disable color and terminal styling")
-	top := flag.Int(
-		"top",
-		0,
-		"print the N largest directories and exit instead of starting the interactive tree; 0 prints every directory",
-	)
-	sortName := flag.String(
-		"sort",
-		inventory.SortAllocated.String(),
-		"metric that ranks --top output: allocated, inodes, files, apparent, or name",
-	)
-	exact := flag.Bool("exact", false, "print unscaled numbers in --top output instead of units")
-	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), "Usage: %s [flags] [PATH...]\n\n", os.Args[0])
-		fmt.Fprintln(flag.CommandLine.Output(), "Scan the current directory by default, or one or more explicit directories.")
-		fmt.Fprintln(flag.CommandLine.Output(), "Symbolic links are inventoried but never followed.")
-		fmt.Fprintln(flag.CommandLine.Output(), "Without --top an interactive tree is shown; with it a ranked list is printed and dirstat exits.")
-		fmt.Fprintln(flag.CommandLine.Output(), "\nFlags:")
-		flag.PrintDefaults()
+	var opts options
+	flags := newFlagSet(os.Args[0], os.Stderr, &opts)
+	// ExitOnError has already reported and exited on a malformed command line.
+	_ = flags.Parse(os.Args[1:])
+
+	// Answered before validation, root resolution, and any terminal setup, so
+	// it works when stdout is a pipe or a file.
+	if opts.version {
+		if err := printVersion(os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "dirstat: %v\n", err)
+			return 1
+		}
+		return 0
 	}
-	flag.Parse()
 
 	oneShot := false
 	sortSet := false
 	exactSet := false
-	flag.Visit(func(set *flag.Flag) {
+	flags.Visit(func(set *flag.Flag) {
 		switch set.Name {
 		case "top":
 			oneShot = true
@@ -70,16 +131,16 @@ func run() int {
 		}
 	})
 
-	if *workers < 1 {
+	if opts.workers < 1 {
 		fmt.Fprintln(os.Stderr, "dirstat: --workers must be at least 1")
 		return 2
 	}
 
-	if *top < 0 {
+	if opts.top < 0 {
 		fmt.Fprintln(os.Stderr, "dirstat: --top may not be negative")
 		return 2
 	}
-	sortField, err := inventory.ParseSortField(*sortName)
+	sortField, err := inventory.ParseSortField(opts.sortName)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dirstat: %v\n", err)
 		return 2
@@ -89,15 +150,15 @@ func run() int {
 		return 2
 	}
 
-	roots, err := scan.ResolveRoots(flag.Args())
+	roots, err := scan.ResolveRoots(flags.Args())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dirstat: %v\n", err)
 		return 2
 	}
 
 	scanOptions := scan.Options{
-		Workers:          *workers,
-		CrossFilesystems: *crossFilesystems,
+		Workers:          opts.workers,
+		CrossFilesystems: opts.crossFilesystems,
 	}
 
 	if oneShot {
@@ -105,7 +166,7 @@ func run() int {
 			context.Background(),
 			roots,
 			scanOptions,
-			report.Options{Top: *top, Sort: sortField, Exact: *exact},
+			report.Options{Top: opts.top, Sort: sortField, Exact: opts.exact},
 			os.Stdout,
 			os.Stderr,
 		)
@@ -120,7 +181,7 @@ func run() int {
 		context.Background(),
 		roots,
 		scanOptions,
-		ui.Options{NoColor: *noColor},
+		ui.Options{NoColor: opts.noColor},
 	)
 	defer model.Close()
 
