@@ -143,6 +143,11 @@ errors. Press `d` to inspect error samples and exact totals.
 | `r`                     | Rescan                                                        |
 | `q`, `Esc`, or `Ctrl+C` | Exit                                                          |
 
+A rescan keeps the sort, filter, column mode, details setting, expanded directories, and selected
+directory, so checking whether a deletion freed the expected space does not mean navigating back
+down from the root. Restoring the selection follows the new scan as it discovers directories. If the
+selected directory is gone, the deepest surviving parent of it is selected instead.
+
 The application does not move, remove, or otherwise modify filesystem content.
 
 ## License
