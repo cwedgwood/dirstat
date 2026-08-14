@@ -6,12 +6,14 @@
 package scan
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -26,10 +28,12 @@ const (
 	maxErrorSamples = 8
 	readBatchSize   = 256
 
-	// defaultRefreshInterval is how often ancestors whose provisional totals
-	// moved are re-emitted. Refreshes are coalesced onto this tick, so the
-	// cost is one event per changed ancestor per interval regardless of how
-	// many descendants were read in between.
+	// defaultRefreshInterval is how often directory updates are emitted. Every
+	// state change is coalesced onto this tick, so a directory costs one event
+	// per interval it changed in, whether it was queued, read, rolled up by a
+	// descendant, or all three: a directory discovered and finished between
+	// two ticks is reported once, in its final state. A human reads a display
+	// a few times a second, so anything faster is built and discarded.
 	defaultRefreshInterval = 100 * time.Millisecond
 )
 
@@ -70,7 +74,7 @@ type Options struct {
 	FinalStatesOnly bool
 
 	// refreshInterval overrides defaultRefreshInterval so tests can observe
-	// provisional propagation without waiting on wall-clock time.
+	// coalesced updates without waiting on wall-clock time.
 	refreshInterval time.Duration
 }
 
@@ -302,6 +306,32 @@ type directoryState struct {
 	finalized    bool
 	skipState    State
 	errorSamples []string
+
+	// depth is the number of directories between this one and its scan root.
+	// The flush orders by it, because a consumer that meets a directory
+	// before its parent has nowhere to attach it.
+	depth int
+
+	// latest is the state the next flush should report, and flushIndex where
+	// it is queued to be reported, or -1. Together they are what makes an
+	// update coalesce: a directory that changes repeatedly between two ticks
+	// overwrites latest and is emitted once.
+	latest     State
+	flushIndex int
+}
+
+func newDirectoryState(task directoryTask, depth int) *directoryState {
+	return &directoryState{task: task, depth: depth, flushIndex: -1}
+}
+
+// pendingUpdate is one directory waiting to be reported. A live directory is
+// held by pointer and rendered at flush time, so further changes cost nothing;
+// a finalized one is held as the already-built update, because its state is
+// dropped from the coordinator as soon as it merges into its parent.
+type pendingUpdate struct {
+	depth  int
+	state  *directoryState
+	update *NodeUpdate
 }
 
 func coordinate(
@@ -358,17 +388,15 @@ func coordinate(
 	}
 
 	states := make(map[string]*directoryState)
-	refresh := make(map[string]struct{})
+	var pending []pendingUpdate
 	visitedDirectories := make(map[inventory.InodeKey]string)
 	// A consumer that only reads final roll-ups is not shown provisional
 	// totals, so neither the intermediate events nor the ancestor arithmetic
 	// behind them are worth doing.
 	wantProgress := !options.FinalStatesOnly
-	synthetic = &directoryState{
-		task:    directoryTask{path: syntheticRootID},
-		scanned: true,
-		pending: len(roots),
-	}
+	synthetic = newDirectoryState(directoryTask{path: syntheticRootID}, 0)
+	synthetic.scanned = true
+	synthetic.pending = len(roots)
 	states[syntheticRootID] = synthetic
 
 	queue = make([]directoryTask, 0, len(roots))
@@ -382,7 +410,9 @@ func coordinate(
 			expected:    root.meta,
 			hasExpected: true,
 		}
-		states[root.Path] = &directoryState{task: task}
+		rootState := newDirectoryState(task, 0)
+		rootState.latest = StateQueued
+		states[root.Path] = rootState
 		visitedDirectories[inventory.InodeKey{
 			Device: root.Device,
 			Inode:  root.Inode,
@@ -391,8 +421,11 @@ func coordinate(
 		if !wantProgress {
 			continue
 		}
+		// Roots are sent as they are queued rather than deferred: there are a
+		// handful of them, it gives the display something to draw at once,
+		// and it puts every root ahead of any event that depends on it.
 		if !sendEvent(ctx, events, Event{
-			Node:     nodeUpdate(states[root.Path], StateQueued),
+			Node:     nodeUpdate(rootState, StateQueued),
 			Progress: progressWithQueue(progress, started, len(queue), 0),
 		}) {
 			close(taskChannel)
@@ -400,16 +433,33 @@ func coordinate(
 		}
 	}
 
-	emitNode := func(state *directoryState, nodeState State) bool {
-		delete(refresh, state.task.path)
-		return sendEvent(ctx, events, Event{
-			Node:     nodeUpdate(state, nodeState),
-			Progress: progressWithQueue(progress, started, len(queue), active),
-		})
+	// markPending queues a directory to be reported by the next flush. A
+	// directory already queued keeps its place, so repeated changes between
+	// two ticks cost one event, not one each.
+	markPending := func(state *directoryState) {
+		if state.flushIndex >= 0 {
+			return
+		}
+		state.flushIndex = len(pending)
+		pending = append(pending, pendingUpdate{depth: state.depth, state: state})
+	}
+
+	// markFinal queues a directory's last state. The built update is held
+	// rather than the state, because finalizing releases the state and its
+	// accumulator; what is retained is one small update per directory that
+	// finalized since the last tick, not one per directory scanned.
+	markFinal := func(state *directoryState, finalState State) {
+		update := pendingUpdate{depth: state.depth, update: nodeUpdate(state, finalState)}
+		if state.flushIndex >= 0 {
+			pending[state.flushIndex] = update
+			state.flushIndex = -1
+			return
+		}
+		pending = append(pending, update)
 	}
 
 	// adjustAncestors folds delta into the provisional total of every ancestor
-	// and marks them for the next refresh tick. Trees are shallow relative to
+	// and queues them for the next refresh tick. Trees are shallow relative to
 	// their width, so walking the parent chain per directory costs a handful
 	// of additions; recomputing roll-ups from the live state map instead would
 	// scale with the size of the unfinished frontier.
@@ -430,25 +480,46 @@ func coordinate(
 				subtractMetrics(&state.provisional, delta)
 			}
 			if id != syntheticRootID {
-				refresh[id] = struct{}{}
+				markPending(state)
 			}
 			id = state.task.parentID
 		}
 	}
 
-	// flushRefresh emits one event per ancestor that moved since the last
-	// tick, however many descendants contributed to the movement.
-	flushRefresh := func() bool {
-		for id := range refresh {
-			state, exists := states[id]
-			if !exists {
-				delete(refresh, id)
-				continue
+	// flush emits the latest state of every directory that changed since the
+	// last tick, however many times it changed and however many descendants
+	// contributed to the change.
+	flush := func() bool {
+		if len(pending) == 0 {
+			return true
+		}
+		// Shallowest first. A consumer links a directory to its parent when
+		// it first meets it, so a child ahead of its parent would arrive
+		// with nowhere to attach. Directories at the same depth are never
+		// ancestors of each other, so their order does not matter.
+		//
+		// This leaves flushIndex stale, which is safe only because nothing
+		// reads it before the loop below clears it: the coordinator is the
+		// sole writer and does not run while a flush is in progress.
+		slices.SortFunc(pending, func(left pendingUpdate, right pendingUpdate) int {
+			return cmp.Compare(left.depth, right.depth)
+		})
+		for index := range pending {
+			entry := &pending[index]
+			update := entry.update
+			if update == nil {
+				update = nodeUpdate(entry.state, entry.state.latest)
+				entry.state.flushIndex = -1
 			}
-			if !emitNode(state, StateScanning) {
+			if !sendEvent(ctx, events, Event{
+				Node:     update,
+				Progress: progressWithQueue(progress, started, len(queue), active),
+			}) {
 				return false
 			}
 		}
+		clear(pending)
+		pending = pending[:0]
 		return true
 	}
 
@@ -464,6 +535,12 @@ func coordinate(
 		state.finalized = true
 
 		if id == syntheticRootID {
+			// Every directory's final state is already queued by the time the
+			// synthetic root finalizes, and the terminal event carries the
+			// summary they add up to, so it has to leave last.
+			if !flush() {
+				return false
+			}
 			if !sendEvent(ctx, events, Event{
 				Progress: progressWithQueue(progress, started, len(queue), active),
 				Done:     true,
@@ -481,7 +558,12 @@ func coordinate(
 		} else if state.accumulator.Metrics().Errors > 0 {
 			finalState = StatePartial
 		}
-		if !emitNode(state, finalState) {
+		if wantProgress {
+			markFinal(state, finalState)
+		} else if !sendEvent(ctx, events, Event{
+			Node:     nodeUpdate(state, finalState),
+			Progress: progressWithQueue(progress, started, len(queue), active),
+		}) {
 			return false
 		}
 
@@ -504,7 +586,6 @@ func coordinate(
 		)
 		parent.pending--
 		delete(states, id)
-		delete(refresh, id)
 
 		if parent.scanned && parent.pending == 0 {
 			return finalize(parent.task.path)
@@ -535,7 +616,7 @@ func coordinate(
 			return
 
 		case <-refreshTick:
-			if !flushRefresh() {
+			if !flush() {
 				close(taskChannel)
 				return
 			}
@@ -566,9 +647,8 @@ func coordinate(
 					expected:    child.meta,
 					hasExpected: true,
 				}
-				childState := &directoryState{
-					task: childTask,
-				}
+				childState := newDirectoryState(childTask, state.depth+1)
+				childState.latest = StateQueued
 				skipState, existingPath := classifyDirectory(child, visitedDirectories)
 				childState.skipState = skipState
 				if skipState == StateAlias {
@@ -597,15 +677,14 @@ func coordinate(
 				}
 
 				queue = append(queue, childTask)
-				if wantProgress && !emitNode(childState, StateQueued) {
-					close(taskChannel)
-					return
+				if wantProgress {
+					markPending(childState)
 				}
 			}
 
-			if wantProgress && !emitNode(state, StateScanning) {
-				close(taskChannel)
-				return
+			if wantProgress {
+				state.latest = StateScanning
+				markPending(state)
 			}
 
 			for _, child := range result.children {

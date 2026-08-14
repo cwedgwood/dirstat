@@ -66,6 +66,13 @@ type Model struct {
 	rootIDs  []string
 	expanded map[string]bool
 
+	// orphans holds nodes whose parent had not been seen when they arrived,
+	// keyed by that parent. The scanner reports ancestors before descendants,
+	// so this stays empty; it exists because the alternative failure is
+	// silent, a directory counted in every ancestor's totals but absent from
+	// the tree, and linking is only ever attempted when a node is first met.
+	orphans map[string][]*treeNode
+
 	// Pre-rescan view state, matched against the new tree by absolute path as
 	// it is discovered. restorePath is the directory that was selected,
 	// restoreID the best node found for it so far.
@@ -373,6 +380,7 @@ func (m *Model) restart() {
 	m.nodes = make(map[string]*treeNode)
 	m.rootIDs = nil
 	m.expanded = make(map[string]bool)
+	m.orphans = nil
 	m.progress = scan.Progress{}
 	m.summary = inventory.Metrics{}
 	m.done = false
@@ -402,6 +410,17 @@ func (m *Model) applyEvent(event scan.Event) {
 				m.expanded[update.ID] = true
 			} else if parent := m.nodes[update.ParentID]; parent != nil {
 				parent.children = append(parent.children, node)
+			} else {
+				if m.orphans == nil {
+					m.orphans = make(map[string][]*treeNode)
+				}
+				m.orphans[update.ParentID] = append(m.orphans[update.ParentID], node)
+			}
+			// Reading a nil or empty map costs nothing, so the ordering
+			// guarantee is not paid for on the common path.
+			if waiting := m.orphans[update.ID]; len(waiting) > 0 {
+				node.children = append(node.children, waiting...)
+				delete(m.orphans, update.ID)
 			}
 			m.noteRestoredNode(node)
 		}

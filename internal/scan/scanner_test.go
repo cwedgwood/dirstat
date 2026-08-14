@@ -834,3 +834,142 @@ func final(state State) bool {
 		return false
 	}
 }
+
+// scanRoots reports the paths a scan was started with, so a test can tell a
+// root from a directory that must have been introduced by its parent.
+func rootPaths(roots []Root) map[string]bool {
+	paths := make(map[string]bool, len(roots))
+	for _, root := range roots {
+		paths[root.Path] = true
+	}
+	return paths
+}
+
+// checkOrder fails if a directory is reported before the parent it hangs from,
+// or if anything follows the terminal event.
+func checkOrder(t *testing.T, roots []Root, events []Event) {
+	t.Helper()
+
+	isRoot := rootPaths(roots)
+	seen := make(map[string]bool)
+	done := false
+	for _, event := range events {
+		if done {
+			t.Fatal("an event followed the terminal event")
+		}
+		if event.Done {
+			done = true
+			continue
+		}
+		node := event.Node
+		if node == nil {
+			continue
+		}
+		if !isRoot[node.Path] && !seen[node.ParentID] {
+			t.Fatalf("%s was reported before its parent %s", node.Path, node.ParentID)
+		}
+		seen[node.Path] = true
+	}
+	if !done {
+		t.Fatal("scan produced no terminal event")
+	}
+}
+
+func TestUpdatesCoalesceOntoTheRefreshTick(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	for index := range 6 {
+		branch := filepath.Join(root, fmt.Sprintf("branch-%d", index))
+		makeChain(t, branch, 5)
+		if err := os.WriteFile(filepath.Join(branch, "file"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	roots, err := ResolveRoots([]string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A tick that never arrives leaves exactly one flush, the one that has to
+	// happen before the terminal event, so what reaches the consumer is what
+	// coalescing produces when a directory is discovered, read and finalized
+	// inside a single interval.
+	events := collectEvents(t, roots, Options{
+		Workers:         4,
+		refreshInterval: time.Hour,
+	})
+	checkOrder(t, roots, events)
+
+	seen := make(map[string]int)
+	var terminal Event
+	for _, event := range events {
+		if event.Done {
+			terminal = event
+		}
+		if event.Node == nil {
+			continue
+		}
+		if !final(event.Node.State) && event.Node.Path != root {
+			t.Fatalf(
+				"%s was reported as %q before it was final",
+				event.Node.Path,
+				event.Node.State,
+			)
+		}
+		seen[event.Node.Path]++
+	}
+	if want := walkExactMetrics(t, root); terminal.Summary != want {
+		t.Fatalf("summary = %+v, want %+v", terminal.Summary, want)
+	}
+	if uint64(len(seen)) != terminal.Summary.Directories {
+		t.Fatalf(
+			"reported %d directories, want %d",
+			len(seen),
+			terminal.Summary.Directories,
+		)
+	}
+	for path, count := range seen {
+		// The root is sent once as it is queued, before there is anything to
+		// coalesce it with.
+		want := 1
+		if path == root {
+			want = 2
+		}
+		if count != want {
+			t.Fatalf("%s was reported %d times, want %d", path, count, want)
+		}
+	}
+}
+
+func TestCoalescedUpdatesReportAncestorsBeforeDescendants(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	for index := range 6 {
+		branch := filepath.Join(root, fmt.Sprintf("branch-%d", index))
+		makeChain(t, branch, 40)
+	}
+	roots, err := ResolveRoots([]string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Ticking constantly maximises the number of flushes, and so the number
+	// of chances to hand a consumer a directory whose parent it has not met.
+	events := collectEvents(t, roots, Options{
+		Workers:         3,
+		refreshInterval: 100 * time.Microsecond,
+	})
+	checkOrder(t, roots, events)
+
+	var final Event
+	for _, event := range events {
+		if event.Done {
+			final = event
+		}
+	}
+	if want := walkExactMetrics(t, root); final.Summary != want {
+		t.Fatalf("summary = %+v, want %+v", final.Summary, want)
+	}
+}
