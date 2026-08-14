@@ -13,14 +13,10 @@ import (
 	"strings"
 )
 
-// Stamped with -ldflags -X at release time so a published binary names its tag.
-// Everything else is recovered from the build information the toolchain embeds,
-// so an unstamped build still reports something true rather than nothing.
-var (
-	version string
-	commit  string
-)
-
+// The toolchain records the module version, the commit, its timestamp and
+// whether the tree was dirty, and since Go 1.24 it derives the version from a
+// VCS tag when the build sits on one. Stamping any of that with -ldflags -X
+// would only duplicate it, and would go stale silently when it disagreed.
 const unknownVersion = "(unknown)"
 
 // buildDetails is what the binary can honestly say about its own provenance.
@@ -35,30 +31,20 @@ type buildDetails struct {
 	platform  string
 }
 
-func collectBuildDetails(stampedVersion, stampedCommit string, info *debug.BuildInfo, ok bool) buildDetails {
+func collectBuildDetails(info *debug.BuildInfo, ok bool) buildDetails {
 	details := buildDetails{
-		version:   stampedVersion,
-		commit:    stampedCommit,
 		goVersion: runtime.Version(),
 		platform:  runtime.GOOS + "/" + runtime.GOARCH,
 	}
 
 	if ok && info != nil {
-		if details.version == "" {
-			details.version = info.Main.Version
-		}
+		details.version = info.Main.Version
 		for _, setting := range info.Settings {
 			switch setting.Key {
 			case "vcs.revision":
-				if details.commit == "" {
-					details.commit = setting.Value
-				}
+				details.commit = setting.Value
 			case "vcs.modified":
-				// Only meaningful for a revision we took from the build info;
-				// a stamped commit describes the source, not the work tree.
-				if stampedCommit == "" && setting.Value == "true" {
-					details.modified = true
-				}
+				details.modified = setting.Value == "true"
 			case "vcs.time":
 				details.committed = setting.Value
 			}
@@ -107,5 +93,5 @@ func (d buildDetails) writeTo(w io.Writer) error {
 
 func printVersion(w io.Writer) error {
 	info, ok := debug.ReadBuildInfo()
-	return collectBuildDetails(version, commit, info, ok).writeTo(w)
+	return collectBuildDetails(info, ok).writeTo(w)
 }

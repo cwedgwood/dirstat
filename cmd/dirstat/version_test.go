@@ -19,35 +19,35 @@ func buildInfo(mainVersion string, settings ...debug.BuildSetting) *debug.BuildI
 	}
 }
 
-func TestCollectBuildDetailsPrefersStampedValues(t *testing.T) {
+func TestCollectBuildDetailsReadsTheTagFromBuildInfo(t *testing.T) {
 	t.Parallel()
 
-	details := collectBuildDetails("v1.2.3", "6b4d1c0", buildInfo("(devel)",
-		debug.BuildSetting{Key: "vcs.revision", Value: "0000000"},
-		debug.BuildSetting{Key: "vcs.modified", Value: "true"},
+	// Since Go 1.24 the toolchain derives the module version from a VCS tag
+	// when the build sits on one, which is where a release gets its name.
+	details := collectBuildDetails(buildInfo("v1.2.3",
+		debug.BuildSetting{Key: "vcs.revision", Value: "6b4d1c0"},
+		debug.BuildSetting{Key: "vcs.modified", Value: "false"},
 		debug.BuildSetting{Key: "vcs.time", Value: "2026-08-13T07:19:26Z"},
 	), true)
 
 	if details.version != "v1.2.3" {
-		t.Fatalf("version = %q, want the stamped tag", details.version)
+		t.Fatalf("version = %q, want the tag the toolchain recorded", details.version)
 	}
 	if details.commit != "6b4d1c0" {
-		t.Fatalf("commit = %q, want the stamped revision", details.commit)
+		t.Fatalf("commit = %q, want the recorded revision", details.commit)
 	}
-	// The stamp names the source a release was cut from, so a dirty work tree
-	// in the build directory says nothing about it.
 	if details.modified {
-		t.Fatal("stamped commit marked modified")
+		t.Fatal("clean tree reported as modified")
 	}
 	if details.committed != "2026-08-13T07:19:26Z" {
 		t.Fatalf("committed = %q, want the recorded commit time", details.committed)
 	}
 }
 
-func TestCollectBuildDetailsFallsBackToBuildInfo(t *testing.T) {
+func TestCollectBuildDetailsUsesBuildInfo(t *testing.T) {
 	t.Parallel()
 
-	details := collectBuildDetails("", "", buildInfo("v0.4.0",
+	details := collectBuildDetails(buildInfo("v0.4.0",
 		debug.BuildSetting{Key: "vcs.revision", Value: "3425e45f5202b1c1d8c8ca26f86cc7f7b76b6ec4"},
 		debug.BuildSetting{Key: "vcs.modified", Value: "true"},
 		debug.BuildSetting{Key: "vcs.time", Value: "2026-08-13T07:19:26Z"},
@@ -73,7 +73,7 @@ func TestCollectBuildDetailsWithoutVCSSettings(t *testing.T) {
 	t.Parallel()
 
 	out := &strings.Builder{}
-	details := collectBuildDetails("", "", buildInfo("v0.4.0"), true)
+	details := collectBuildDetails(buildInfo("v0.4.0"), true)
 	if err := details.writeTo(out); err != nil {
 		t.Fatalf("writeTo: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestCollectBuildDetailsWithoutVCSSettings(t *testing.T) {
 func TestCollectBuildDetailsWithoutBuildInfo(t *testing.T) {
 	t.Parallel()
 
-	details := collectBuildDetails("", "", nil, false)
+	details := collectBuildDetails(nil, false)
 	if details.version != unknownVersion {
 		t.Fatalf("version = %q, want %q", details.version, unknownVersion)
 	}
@@ -101,7 +101,7 @@ func TestWriteToAlignsAndMarksModified(t *testing.T) {
 	t.Parallel()
 
 	out := &strings.Builder{}
-	details := collectBuildDetails("v1.2.3", "", buildInfo("",
+	details := collectBuildDetails(buildInfo("v1.2.3",
 		debug.BuildSetting{Key: "vcs.revision", Value: "abc1234"},
 		debug.BuildSetting{Key: "vcs.modified", Value: "true"},
 		debug.BuildSetting{Key: "vcs.time", Value: "2026-08-13T07:19:26Z"},

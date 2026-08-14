@@ -46,7 +46,7 @@ jobs:
             mkdir -p "dist/$package"
             GOOS=linux GOARCH="$arch" go build \
               -trimpath \
-              -ldflags="-s -w -X main.version=${GITHUB_REF_NAME} -X main.commit=${GITHUB_SHA}" \
+              -ldflags="-s -w" \
               -o "dist/$package/dirstat" \
               ./cmd/dirstat
             tar -C dist -czf "dist/$package.tar.gz" "$package"
@@ -54,6 +54,22 @@ jobs:
           done
           cd dist
           sha256sum ./*.tar.gz > checksums.txt
+      # The version comes from the tag the toolchain read out of the checkout,
+      # not from anything this workflow passes in, so it can fail quietly: a
+      # shallow checkout without the tag, or git declining to trust the
+      # directory, yields a binary calling itself (devel). Ask the artefact
+      # what it is rather than assuming.
+      - name: the binary knows which release it is
+        run: |
+          set -eu
+          version="${GITHUB_REF_NAME#v}"
+          tar -xzf "dist/dirstat_${version}_linux_amd64.tar.gz" -C /tmp
+          reported="$(/tmp/dirstat_${version}_linux_amd64/dirstat --version | head -1)"
+          echo "$reported"
+          if [ "$reported" != "dirstat ${GITHUB_REF_NAME}" ]; then
+            echo "expected 'dirstat ${GITHUB_REF_NAME}'" >&2
+            exit 1
+          fi
       - name: publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

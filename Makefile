@@ -2,12 +2,10 @@
 
 # Match what the release workflow ships, so a locally built binary behaves like
 # a released one: static, stripped, and without the build machine's paths baked
-# in. VERSION stays empty until a tag exists, which lets the binary fall back to
-# the module pseudo-version recorded in the build info rather than reporting a
-# bare commit as though it were a release.
-VERSION ?= $(shell git describe --tags --dirty 2>/dev/null)
-COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null)
-LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT)
+# in. Nothing is stamped with -ldflags -X: the toolchain already records the
+# commit, its timestamp, whether the tree was dirty, and since Go 1.24 the
+# version from a VCS tag, and --version reads all of it from the build info.
+LDFLAGS := -s -w
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags="$(LDFLAGS)" -o dirstat ./cmd/dirstat
