@@ -188,6 +188,60 @@ func TestSortPickerSelectsInodes(t *testing.T) {
 	}
 }
 
+func TestSortOptionSeedsFieldAndDirection(t *testing.T) {
+	t.Parallel()
+
+	for _, testCase := range []struct {
+		field      inventory.SortField
+		descending bool
+	}{
+		{field: inventory.SortAllocated, descending: true},
+		{field: inventory.SortInodes, descending: true},
+		{field: inventory.SortFiles, descending: true},
+		{field: inventory.SortApparent, descending: true},
+		{field: inventory.SortName, descending: false},
+	} {
+		model := New(
+			context.Background(),
+			nil,
+			scan.Options{Workers: 1},
+			Options{NoColor: true, Sort: testCase.field},
+		)
+		if model.sortField != testCase.field || model.descending != testCase.descending {
+			t.Errorf(
+				"--sort %s opened as %s descending=%t, want %s descending=%t",
+				testCase.field,
+				model.sortField,
+				model.descending,
+				testCase.field,
+				testCase.descending,
+			)
+		}
+		model.Close()
+	}
+}
+
+func TestSortDirectionFollowsFieldAcrossNameBoundary(t *testing.T) {
+	t.Parallel()
+
+	model := testModel()
+	model.applySortChoice(inventory.SortName)
+	if model.descending {
+		t.Fatal("choosing name kept the descending direction of a quantity")
+	}
+	model.applySortChoice(inventory.SortInodes)
+	if !model.descending {
+		t.Fatal("returning to a quantity kept the ascending direction of name")
+	}
+
+	// Only a change of kind resets it; O still reverses either.
+	model.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'O'}})
+	model.applySortChoice(inventory.SortFiles)
+	if model.descending {
+		t.Fatal("switching between two quantities discarded the reversal")
+	}
+}
+
 func TestTiesBreakAlphabeticallyInBothDirections(t *testing.T) {
 	t.Parallel()
 

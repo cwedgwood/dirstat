@@ -59,12 +59,19 @@ dirstat
 dirstat /path/to/inspect
 dirstat /first/root /second/root
 dirstat --workers 16 /path/to/inspect
+dirstat --sort inodes /path/to/inspect
 dirstat --cross-filesystems /
 ```
 
 With no path, the current working directory is scanned. Scan roots must be directories and may not
 overlap. Without `--top` the interactive tree is shown; see [Ranked list](#ranked-list) for
 non-interactive output. `dirstat --help` lists every flag.
+
+`--sort` sets the order the tree opens in, using the same field names the ranked list and the
+interactive `s` menu accept. Direction follows the field, so a quantity opens largest first and
+`--sort name` opens A to Z, matching how `--top` orders the same fields; `O` still reverses either.
+`--exact` applies to `--top` output only, because it is about printing unscaled numbers and the tree
+never does that.
 
 By default, traversal stays on the filesystem containing each scan root.  Mounted directories are
 counted and marked `[m]`, but their contents are not read. `--cross-filesystems` disables that
@@ -165,6 +172,9 @@ errors. Press `d` to inspect error samples and exact totals.
 | `d`                     | Toggle details and error samples                              |
 | `r`                     | Rescan                                                        |
 | `q`, `Esc`, or `Ctrl+C` | Exit                                                          |
+
+Ties break alphabetically whichever way the metric runs, as the ranked list does, so reversing the
+sort does not also shuffle rows that are equal under it.
 
 A rescan keeps the sort, filter, column mode, details setting, expanded directories, and selected
 directory, so checking whether a deletion freed the expected space does not mean navigating back

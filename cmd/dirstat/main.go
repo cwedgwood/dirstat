@@ -63,7 +63,7 @@ func newFlagSet(name string, out io.Writer, opts *options) *flag.FlagSet {
 		&opts.sortName,
 		"sort",
 		inventory.SortAllocated.String(),
-		"metric that ranks --top output: allocated, inodes, files, apparent, or name",
+		"metric to sort by: allocated, inodes, files, apparent, or name; ranks --top output and sets the interactive tree's initial order",
 	)
 	flags.BoolVar(
 		&opts.exact,
@@ -87,7 +87,8 @@ unless --cross-filesystems is given.
 Without --top an interactive tree is shown. With --top a ranked list of the
 directories holding the most of one metric is written to standard output and
 dirstat exits; that list is plain text, so it can be redirected or piped.
---sort and --exact apply to --top output only.
+--sort ranks that list and sets the order the tree opens in; --exact applies to
+--top output only.
 
 The exit status is 0 when the scan completed, 1 when it did not, and 2 for a
 usage error.
@@ -118,14 +119,11 @@ func run() int {
 	}
 
 	oneShot := false
-	sortSet := false
 	exactSet := false
 	flags.Visit(func(set *flag.Flag) {
 		switch set.Name {
 		case "top":
 			oneShot = true
-		case "sort":
-			sortSet = true
 		case "exact":
 			exactSet = true
 		}
@@ -145,8 +143,13 @@ func run() int {
 		fmt.Fprintf(os.Stderr, "dirstat: %v\n", err)
 		return 2
 	}
-	if !oneShot && (sortSet || exactSet) {
-		fmt.Fprintln(os.Stderr, "dirstat: --sort and --exact only apply to --top output")
+	// --sort is accepted in both modes: which metric matters is as much a
+	// question when browsing a tree as when ranking one, and the tree already
+	// offers the same five choices through its own menu. --exact stays
+	// --top-only, because it is about printing unscaled numbers and the tree
+	// never does that.
+	if !oneShot && exactSet {
+		fmt.Fprintln(os.Stderr, "dirstat: --exact only applies to --top output")
 		return 2
 	}
 
@@ -181,7 +184,7 @@ func run() int {
 		context.Background(),
 		roots,
 		scanOptions,
-		ui.Options{NoColor: opts.noColor},
+		ui.Options{NoColor: opts.noColor, Sort: sortField},
 	)
 	defer model.Close()
 

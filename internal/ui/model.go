@@ -45,6 +45,9 @@ type scanEventMsg struct {
 // Options controls presentation.
 type Options struct {
 	NoColor bool
+
+	// Sort is the metric the tree opens sorted by.
+	Sort inventory.SortField
 }
 
 // Model is the Bubble Tea application model.
@@ -105,8 +108,9 @@ func New(
 		roots:         roots,
 		scanOptions:   scanOptions,
 		options:       options,
-		sortField:     inventory.SortAllocated,
-		descending:    true,
+		sortField:     options.Sort,
+		sortChoice:    options.Sort,
+		descending:    naturalDescending(options.Sort),
 		selectedStyle: lipgloss.NewStyle().Reverse(true),
 		activeStyle:   lipgloss.NewStyle().Foreground(lipgloss.Color("6")),
 		warningStyle:  lipgloss.NewStyle().Foreground(lipgloss.Color("3")),
@@ -490,8 +494,6 @@ func (m *Model) sortedNodes(nodes []*treeNode) []*treeNode {
 	sorted := append([]*treeNode(nil), nodes...)
 	slices.SortStableFunc(sorted, func(left *treeNode, right *treeNode) int {
 		byName := strings.Compare(left.lowerName, right.lowerName)
-		// Sorting by name has no metric behind it, so the name is the sort
-		// itself and reversing it is the point.
 		if m.sortField == inventory.SortName {
 			if m.descending {
 				return -byName
@@ -505,9 +507,9 @@ func (m *Model) sortedNodes(nodes []*treeNode) []*treeNode {
 		if byMetric != 0 {
 			return byMetric
 		}
-		// The tiebreak runs alphabetically whichever way the metric does, as
-		// the ranked list orders it. Reversing the metric should not also
-		// shuffle rows that are equal under it.
+		// Ties break alphabetically whichever way the metric runs, as the
+		// ranked list does, so reversing the sort does not also shuffle rows
+		// that are equal under it.
 		return byName
 	})
 	return sorted
@@ -821,8 +823,21 @@ func movesCursor(key string) bool {
 func (m *Model) applySortChoice(field inventory.SortField) {
 	rows := m.visibleRows()
 	selectedID := m.selectedID(rows)
+	// Largest-first is what a size question wants, A to Z what an alphabetical
+	// one wants. Carrying the previous direction across that boundary produces
+	// a reverse-alphabetical list nobody asked for.
+	if naturalDescending(field) != naturalDescending(m.sortField) {
+		m.descending = naturalDescending(field)
+	}
 	m.sortField = field
 	m.restoreSelection(m.visibleRows(), selectedID)
+}
+
+// naturalDescending is the direction a field is normally read in: biggest first
+// for a quantity, A to Z for a name. It matches how --top orders the same
+// fields.
+func naturalDescending(field inventory.SortField) bool {
+	return field != inventory.SortName
 }
 
 func (m *Model) selectParent(rows []row, parentID string) {
