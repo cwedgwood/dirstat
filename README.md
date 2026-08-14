@@ -176,6 +176,11 @@ errors. Press `d` to inspect error samples and exact totals.
 Ties break alphabetically whichever way the metric runs, as the ranked list does, so reversing the
 sort does not also shuffle rows that are equal under it.
 
+The header carries scan progress on the left and elapsed time hard right. The clock is measured by
+the scanner rather than by the display, so it excludes process startup and terminal setup, and it
+stops when the scan does rather than when the display notices: the last progress snapshot carries
+the total. In a terminal too narrow for both, the counters are dropped and the clock kept.
+
 A rescan keeps the sort, filter, column mode, details setting, expanded directories, and selected
 directory, so checking whether a deletion freed the expected space does not mean navigating back
 down from the root. Restoring the selection follows the new scan as it discovers directories. If the

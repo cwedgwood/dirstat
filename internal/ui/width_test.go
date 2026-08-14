@@ -6,6 +6,7 @@ package ui
 import (
 	"strings"
 	"testing"
+	"time"
 	"unicode"
 
 	"github.com/charmbracelet/x/ansi"
@@ -199,6 +200,48 @@ func TestChromeLinesFitTerminalWidth(t *testing.T) {
 		if got := ansi.StringWidth(line); got > width {
 			t.Errorf("line %d is %d cells wide, want at most %d: %q", index, got, width, line)
 		}
+	}
+}
+
+func TestStatusLinePlacesElapsedHardRight(t *testing.T) {
+	t.Parallel()
+
+	model := testModel()
+	model.options.NoColor = true
+	model.progress = scan.Progress{Scanned: 1, Discovered: 2, Elapsed: 4190 * time.Millisecond}
+
+	for _, width := range []int{40, 80, 120} {
+		line := model.renderStatus(width)
+		if got := ansi.StringWidth(line); got != width {
+			t.Errorf("width %d: status line is %d cells wide", width, got)
+		}
+		if !strings.HasSuffix(line, "elapsed 4.19s") {
+			t.Errorf("width %d: elapsed time is not hard right: %q", width, line)
+		}
+		if !strings.HasPrefix(line, "dirstat |") {
+			t.Errorf("width %d: counters were dropped with room to spare: %q", width, line)
+		}
+	}
+}
+
+func TestNarrowStatusLineKeepsTheClockAndDropsTheCounters(t *testing.T) {
+	t.Parallel()
+
+	model := testModel()
+	model.options.NoColor = true
+	model.progress = scan.Progress{Scanned: 1, Discovered: 2, Elapsed: 4190 * time.Millisecond}
+
+	for _, width := range []int{1, 5, 13, 14} {
+		line := model.renderStatus(width)
+		if got := ansi.StringWidth(line); got > width {
+			t.Errorf("width %d: status line is %d cells wide", width, got)
+		}
+		if strings.Contains(line, "dirstat") {
+			t.Errorf("width %d: counters kept in place of the clock: %q", width, line)
+		}
+	}
+	if got := model.renderStatus(13); got != "elapsed 4.19s" {
+		t.Errorf("exact-fit status line = %q, want the whole clock", got)
 	}
 }
 

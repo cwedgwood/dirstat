@@ -84,6 +84,12 @@ type Progress struct {
 	Queued     uint64
 	Active     uint64
 	Errors     uint64
+
+	// Elapsed is the time since the scan started, measured by the scanner
+	// rather than by whoever is watching it, so it excludes process startup
+	// and terminal setup. The terminal event is emitted as the scan ends, so
+	// the last snapshot carries the total.
+	Elapsed time.Duration
 }
 
 func metadataFromUnixStat(stat *unix.Stat_t) metadata {
@@ -232,7 +238,10 @@ func Start(ctx context.Context, roots []Root, options Options) <-chan Event {
 		options.refreshInterval = defaultRefreshInterval
 	}
 	events := make(chan Event, 256)
-	go coordinate(ctx, roots, options, events)
+	// Taken here rather than in the coordinator so the clock covers everything
+	// the caller asked for, including scheduling that goroutine.
+	started := time.Now()
+	go coordinate(ctx, roots, options, events, started)
 	return events
 }
 
@@ -289,6 +298,7 @@ func coordinate(
 	roots []Root,
 	options Options,
 	events chan Event,
+	started time.Time,
 ) {
 	var (
 		progress  Progress
@@ -304,7 +314,7 @@ func coordinate(
 				summary = synthetic.accumulator.Metrics()
 			}
 			cancelledEvent := Event{
-				Progress:  progressWithQueue(progress, len(queue), active),
+				Progress:  progressWithQueue(progress, started, len(queue), active),
 				Done:      true,
 				Cancelled: true,
 				Summary:   summary,
@@ -331,7 +341,7 @@ func coordinate(
 	}
 	if len(roots) == 0 {
 		completed = true
-		events <- Event{Done: true}
+		events <- Event{Progress: progressWithQueue(progress, started, 0, 0), Done: true}
 		close(taskChannel)
 		return
 	}
@@ -365,7 +375,7 @@ func coordinate(
 		queue = append(queue, task)
 		if !sendEvent(ctx, events, Event{
 			Node:     nodeUpdate(states[root.Path], StateQueued),
-			Progress: progressWithQueue(progress, len(queue), 0),
+			Progress: progressWithQueue(progress, started, len(queue), 0),
 		}) {
 			close(taskChannel)
 			return
@@ -376,7 +386,7 @@ func coordinate(
 		delete(refresh, state.task.path)
 		return sendEvent(ctx, events, Event{
 			Node:     nodeUpdate(state, nodeState),
-			Progress: progressWithQueue(progress, len(queue), active),
+			Progress: progressWithQueue(progress, started, len(queue), active),
 		})
 	}
 
@@ -432,7 +442,7 @@ func coordinate(
 
 		if id == syntheticRootID {
 			if !sendEvent(ctx, events, Event{
-				Progress: progressWithQueue(progress, len(queue), active),
+				Progress: progressWithQueue(progress, started, len(queue), active),
 				Done:     true,
 				Summary:  state.accumulator.Metrics(),
 			}) {
@@ -797,9 +807,15 @@ func sendEvent(ctx context.Context, events chan<- Event, event Event) bool {
 	}
 }
 
-func progressWithQueue(progress Progress, queued int, active int) Progress {
+func progressWithQueue(
+	progress Progress,
+	started time.Time,
+	queued int,
+	active int,
+) Progress {
 	progress.Queued = uint64(queued)
 	progress.Active = uint64(active)
+	progress.Elapsed = time.Since(started)
 	return progress
 }
 

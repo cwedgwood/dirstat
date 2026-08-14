@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -392,6 +393,29 @@ func TestTruncate(t *testing.T) {
 
 	if got := truncate("abcdef", 5); got != "ab..." {
 		t.Fatalf("truncate = %q", got)
+	}
+}
+
+func TestFormatElapsedStaysReadableAcrossTheWholeRange(t *testing.T) {
+	t.Parallel()
+
+	for _, testCase := range []struct {
+		elapsed time.Duration
+		want    string
+	}{
+		{elapsed: 0, want: "0ms"},
+		{elapsed: 41 * time.Millisecond, want: "41ms"},
+		{elapsed: 999 * time.Millisecond, want: "999ms"},
+		{elapsed: 4190 * time.Millisecond, want: "4.19s"},
+		{elapsed: 59 * time.Second, want: "59.00s"},
+		{elapsed: 60 * time.Second, want: "1m00s"},
+		{elapsed: 3599 * time.Second, want: "59m59s"},
+		{elapsed: 3600 * time.Second, want: "1h00m00s"},
+		{elapsed: 7325 * time.Second, want: "2h02m05s"},
+	} {
+		if got := formatElapsed(testCase.elapsed); got != testCase.want {
+			t.Errorf("formatElapsed(%s) = %q, want %q", testCase.elapsed, got, testCase.want)
+		}
 	}
 }
 

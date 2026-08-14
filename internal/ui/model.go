@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -537,15 +538,45 @@ func (m *Model) renderStatus(width int) string {
 		format.Count(m.progress.Queued),
 		format.Count(m.progress.Errors),
 	)
+	// Elapsed time sits hard right: it is the number this program exists to
+	// make smaller, and after a long scan it should be readable without
+	// hunting for it among the counters.
+	elapsed := "elapsed " + formatElapsed(m.progress.Elapsed)
+	elapsedWidth := ansi.StringWidth(elapsed)
+	if width > elapsedWidth+1 {
+		line = padCells(line, width-elapsedWidth-1) + " " + elapsed
+	} else {
+		// Too narrow for both; the counters lose, the clock being the shorter
+		// and the more useful of the two.
+		line = truncate(elapsed, width)
+	}
 	if !m.options.NoColor {
 		if m.progress.Errors > 0 {
-			return m.warningStyle.Render(truncate(line, width))
+			return m.warningStyle.Render(line)
 		}
 		if !m.done {
-			return m.activeStyle.Render(truncate(line, width))
+			return m.activeStyle.Render(line)
 		}
 	}
-	return truncate(line, width)
+	return line
+}
+
+// formatElapsed renders a scan duration compactly, with roughly three
+// significant figures, so that a scan of /etc and a scan of a home directory
+// with millions of inodes are both readable in the same fixed corner.
+func formatElapsed(elapsed time.Duration) string {
+	seconds := elapsed.Seconds()
+	switch {
+	case seconds < 1:
+		return fmt.Sprintf("%dms", elapsed.Milliseconds())
+	case seconds < 60:
+		return fmt.Sprintf("%.2fs", seconds)
+	}
+	whole := int64(elapsed / time.Second)
+	if whole < 3600 {
+		return fmt.Sprintf("%dm%02ds", whole/60, whole%60)
+	}
+	return fmt.Sprintf("%dh%02dm%02ds", whole/3600, (whole%3600)/60, whole%60)
 }
 
 func (m *Model) renderSortAndFilter(width int) string {

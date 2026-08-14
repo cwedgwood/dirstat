@@ -725,3 +725,40 @@ func TestFinalTotalsExactWithHardLinksAcrossSiblingsAndRoots(t *testing.T) {
 		t.Fatalf("multi-root summary = %+v, want %+v", final.Summary, want)
 	}
 }
+
+func TestProgressCarriesElapsedMeasuredByTheScanner(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	makeChain(t, filepath.Join(root, "chain"), 64)
+
+	roots, err := ResolveRoots([]string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	before := time.Now()
+	events := collectEvents(t, roots, Options{Workers: 2})
+	outside := time.Since(before)
+
+	var previous time.Duration
+	var final Event
+	for _, event := range events {
+		if event.Progress.Elapsed < previous {
+			t.Fatalf("elapsed went backwards: %s after %s", event.Progress.Elapsed, previous)
+		}
+		previous = event.Progress.Elapsed
+		if event.Done {
+			final = event
+		}
+	}
+	if !final.Done {
+		t.Fatal("scan produced no terminal event")
+	}
+	// The terminal event is emitted as the scan ends, so its snapshot is the
+	// total: it cannot exceed what the caller measured around the whole scan,
+	// and every earlier snapshot is bounded by it.
+	if final.Progress.Elapsed <= 0 || final.Progress.Elapsed > outside {
+		t.Fatalf("final elapsed = %s, want a positive duration within %s", final.Progress.Elapsed, outside)
+	}
+}
