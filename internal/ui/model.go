@@ -565,14 +565,18 @@ func (m *Model) renderStatus(width int) string {
 // significant figures, so that a scan of /etc and a scan of a home directory
 // with millions of inodes are both readable in the same fixed corner.
 func formatElapsed(elapsed time.Duration) string {
-	seconds := elapsed.Seconds()
-	switch {
-	case seconds < 1:
+	if elapsed < time.Second {
 		return fmt.Sprintf("%dms", elapsed.Milliseconds())
-	case seconds < 60:
-		return fmt.Sprintf("%.2fs", seconds)
 	}
-	whole := int64(elapsed / time.Second)
+	// Below a minute the figure is printed to hundredths, so round it to that
+	// precision before choosing a form. Deciding on the unrounded value prints
+	// 59.999s as "60.00s": a minute, in the branch that exists to avoid saying
+	// so.
+	rounded := elapsed.Round(10 * time.Millisecond)
+	if rounded < time.Minute {
+		return fmt.Sprintf("%.2fs", rounded.Seconds())
+	}
+	whole := int64(rounded / time.Second)
 	if whole < 3600 {
 		return fmt.Sprintf("%dm%02ds", whole/60, whole%60)
 	}

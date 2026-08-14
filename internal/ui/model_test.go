@@ -408,8 +408,13 @@ func TestFormatElapsedStaysReadableAcrossTheWholeRange(t *testing.T) {
 		{elapsed: 999 * time.Millisecond, want: "999ms"},
 		{elapsed: 4190 * time.Millisecond, want: "4.19s"},
 		{elapsed: 59 * time.Second, want: "59.00s"},
+		// The boundary the sub-minute branch exists to guard: printing to
+		// hundredths rounds these up to sixty seconds, which is a minute.
+		{elapsed: 59994 * time.Millisecond, want: "59.99s"},
+		{elapsed: 59999 * time.Millisecond, want: "1m00s"},
 		{elapsed: 60 * time.Second, want: "1m00s"},
 		{elapsed: 3599 * time.Second, want: "59m59s"},
+		{elapsed: 3599999 * time.Millisecond, want: "1h00m00s"},
 		{elapsed: 3600 * time.Second, want: "1h00m00s"},
 		{elapsed: 7325 * time.Second, want: "2h02m05s"},
 	} {
