@@ -348,6 +348,113 @@ func TestScanEventBatchDrainsBufferedEvents(t *testing.T) {
 	}
 }
 
+// scanningModel returns a model already showing a root, with an empty event
+// channel so that a batch drains immediately.
+func scanningModel(t *testing.T) (*Model, chan scan.Event) {
+	t.Helper()
+
+	model := testModel()
+	model.width = 120
+	model.height = 24
+	events := make(chan scan.Event, 4)
+	model.events = events
+	model.Update(scanEventMsg{
+		event: scan.Event{Node: &scan.NodeUpdate{
+			ID:    "/root",
+			Path:  "/root",
+			Name:  "root",
+			Root:  true,
+			State: scan.StateScanning,
+		}},
+		channel: events,
+		ok:      true,
+	})
+	model.View()
+	return model, events
+}
+
+func scanUpdate(model *Model, events chan scan.Event, files uint64) {
+	model.Update(scanEventMsg{
+		event: scan.Event{
+			Node: &scan.NodeUpdate{
+				ID:      "/root",
+				Path:    "/root",
+				Name:    "root",
+				Root:    true,
+				State:   scan.StateScanning,
+				Metrics: inventory.Metrics{Files: files},
+			},
+			Progress: scan.Progress{Scanned: files},
+		},
+		channel: events,
+		ok:      true,
+	})
+}
+
+func TestScanBatchesShareOneFrame(t *testing.T) {
+	t.Parallel()
+
+	model, events := scanningModel(t)
+	builds := model.frameBuilds
+	for files := uint64(1); files <= 20; files++ {
+		scanUpdate(model, events, files)
+		model.View()
+	}
+	if model.frameBuilds != builds {
+		t.Fatalf("scanner batches rebuilt the display %d times, want 0", model.frameBuilds-builds)
+	}
+	if model.nodes["/root"].metrics.Files != 20 {
+		t.Fatal("scanner updates were not applied while frames were reused")
+	}
+}
+
+func TestKeyInputRebuildsTheFrameImmediately(t *testing.T) {
+	t.Parallel()
+
+	model, events := scanningModel(t)
+	before := model.frame
+	scanUpdate(model, events, 42)
+	if model.View() != before {
+		t.Fatal("a scanner batch rebuilt the display instead of deferring it")
+	}
+
+	model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
+	frame := model.View()
+	if !strings.Contains(frame, "42") {
+		t.Fatalf("key input did not rebuild the display: %q", frame)
+	}
+}
+
+func TestFinalFrameShowsFinalTotals(t *testing.T) {
+	t.Parallel()
+
+	model, events := scanningModel(t)
+	scanUpdate(model, events, 7)
+	model.View()
+
+	model.Update(scanEventMsg{
+		event: scan.Event{
+			Node: &scan.NodeUpdate{
+				ID:      "/root",
+				Path:    "/root",
+				Name:    "root",
+				Root:    true,
+				State:   scan.StateComplete,
+				Metrics: inventory.Metrics{Files: 99},
+			},
+			Progress: scan.Progress{Scanned: 99, Discovered: 99},
+			Done:     true,
+			Summary:  inventory.Metrics{Files: 99},
+		},
+		channel: events,
+		ok:      true,
+	})
+	frame := model.View()
+	if !strings.Contains(frame, "complete") || !strings.Contains(frame, "99") {
+		t.Fatalf("final frame is not the final state: %q", frame)
+	}
+}
+
 func TestFilterCtrlCQuits(t *testing.T) {
 	t.Parallel()
 

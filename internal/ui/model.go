@@ -20,6 +20,29 @@ import (
 	"github.com/cwedgwood/dirstat/internal/scan"
 )
 
+const (
+	// frameInterval is the shortest gap between two rebuilt displays while a
+	// scan is feeding the model. The scanner already coalesces onto a 100ms
+	// tick, but one tick's worth of updates reaches Update in several batches,
+	// and Bubble Tea renders after every message; without this the tree is
+	// rebuilt tens of times per tick and the terminal, which repaints at 60
+	// FPS, shows one of them. Half the scanner's tick, so a tick is never
+	// delayed by a frame boundary, and a batch that takes longer than this to
+	// apply still updates the display while it does.
+	frameInterval = 50 * time.Millisecond
+
+	// drainBudget bounds how long one Update spends applying scanner events
+	// before returning to the event loop. It is a time rather than an event
+	// count because it exists to bound input latency, and what an event costs
+	// to apply varies with the tree.
+	drainBudget = 8 * time.Millisecond
+
+	// drainClockInterval is how often the drain consults the clock. Reading it
+	// per event is measurable across the tens of thousands of events a large
+	// scan delivers, and the budget does not need that resolution.
+	drainClockInterval = 256
+)
+
 type treeNode struct {
 	id           string
 	parentID     string
@@ -99,6 +122,17 @@ type Model struct {
 	compact    bool
 	details    bool
 
+	// frame is the last display built, kept so that a burst of scanner events
+	// costs one rebuild rather than one per batch. deferFrame says the frame
+	// may be reused: only the scanner path sets it, so key input, a resize and
+	// the end of a scan all rebuild, and a path that forgets to think about
+	// the frame gets the exact one. frameBuilds counts rebuilds, which is what
+	// the cadence is measured and tested in.
+	frame       string
+	frameAt     time.Time
+	deferFrame  bool
+	frameBuilds int
+
 	selectedStyle lipgloss.Style
 	activeStyle   lipgloss.Style
 	warningStyle  lipgloss.Style
@@ -141,6 +175,10 @@ func (m *Model) Close() {
 
 // Update handles terminal and scanner events.
 func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
+	// Anything that is not a batch of scanner updates has to be on screen at
+	// the next frame, so reusing the last one is opt-in and lasts one message.
+	m.deferFrame = false
+
 	switch message := message.(type) {
 	case tea.WindowSizeMsg:
 		m.width = message.Width
@@ -164,8 +202,12 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		selectedID := m.selectedID(m.visibleRows())
 		m.applyEvent(message.event)
 		finished := message.event.Done
+		deadline := time.Now().Add(drainBudget)
 	drain:
-		for processed := 1; processed < 512 && !finished; processed++ {
+		for processed := 1; !finished; processed++ {
+			if processed%drainClockInterval == 0 && time.Now().After(deadline) {
+				break drain
+			}
 			select {
 			case event, ok := <-message.channel:
 				if !ok {
@@ -184,9 +226,12 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.restoreSelection(m.visibleRows(), m.takeRestoreTarget(selectedID))
 		if finished {
+			// The last frame of a scan carries the totals the user will act
+			// on, so it is always built rather than reused.
 			m.clearRestore()
 			return m, nil
 		}
+		m.deferFrame = true
 		return m, waitForEvent(m.events)
 
 	case tea.KeyMsg:
@@ -197,6 +242,12 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the current inventory.
 func (m *Model) View() string {
+	if m.deferFrame && m.frameAt.After(time.Now().Add(-frameInterval)) {
+		return m.frame
+	}
+	m.deferFrame = false
+	m.frameBuilds++
+
 	rows := m.visibleRows()
 	m.clampCursor(rows)
 
@@ -243,7 +294,9 @@ func (m *Model) View() string {
 		lines = append(lines, truncate("arrows/jk move  pgup/pgdn page  enter expand  s choose sort  O reverse", width))
 	}
 	lines = append(lines, truncate("o cycle sort  / filter  c columns  d details  r rescan  q/esc quit", width))
-	return strings.Join(lines, "\n")
+	m.frame = strings.Join(lines, "\n")
+	m.frameAt = time.Now()
+	return m.frame
 }
 
 func (m *Model) handleKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
