@@ -58,6 +58,17 @@ type Options struct {
 	Workers          int
 	CrossFilesystems bool
 
+	// FinalStatesOnly says the consumer will only ever look at a directory's
+	// final roll-up, so the scanner emits nothing for a directory until it is
+	// final, and drops the provisional bookkeeping that exists to feed those
+	// intermediate updates. The terminal Done event is still sent.
+	//
+	// A ranked report discards every non-final node it is handed, which on a
+	// 42.7K directory tree means building and sending 95K updates to print ten
+	// lines. The zero value keeps every update, so a consumer that wants to
+	// watch the tree fill in gets that without asking.
+	FinalStatesOnly bool
+
 	// refreshInterval overrides defaultRefreshInterval so tests can observe
 	// provisional propagation without waiting on wall-clock time.
 	refreshInterval time.Duration
@@ -349,6 +360,10 @@ func coordinate(
 	states := make(map[string]*directoryState)
 	refresh := make(map[string]struct{})
 	visitedDirectories := make(map[inventory.InodeKey]string)
+	// A consumer that only reads final roll-ups is not shown provisional
+	// totals, so neither the intermediate events nor the ancestor arithmetic
+	// behind them are worth doing.
+	wantProgress := !options.FinalStatesOnly
 	synthetic = &directoryState{
 		task:    directoryTask{path: syntheticRootID},
 		scanned: true,
@@ -373,6 +388,9 @@ func coordinate(
 			Inode:  root.Inode,
 		}] = root.Path
 		queue = append(queue, task)
+		if !wantProgress {
+			continue
+		}
 		if !sendEvent(ctx, events, Event{
 			Node:     nodeUpdate(states[root.Path], StateQueued),
 			Progress: progressWithQueue(progress, started, len(queue), 0),
@@ -396,6 +414,11 @@ func coordinate(
 	// of additions; recomputing roll-ups from the live state map instead would
 	// scale with the size of the unfinished frontier.
 	adjustAncestors := func(startID string, delta inventory.Metrics, add bool) {
+		if !wantProgress {
+			// Provisional totals are only ever read by an intermediate
+			// update, and a final roll-up comes from the merged accumulators.
+			return
+		}
 		for id := startID; id != ""; {
 			state, exists := states[id]
 			if !exists {
@@ -489,8 +512,14 @@ func coordinate(
 		return true
 	}
 
-	ticker := time.NewTicker(options.refreshInterval)
-	defer ticker.Stop()
+	// Nothing is deferred when only final states are wanted, so the loop is
+	// left without a timer to wake it.
+	var refreshTick <-chan time.Time
+	if wantProgress {
+		ticker := time.NewTicker(options.refreshInterval)
+		defer ticker.Stop()
+		refreshTick = ticker.C
+	}
 
 	for !completed {
 		var nextTask directoryTask
@@ -505,7 +534,7 @@ func coordinate(
 			close(taskChannel)
 			return
 
-		case <-ticker.C:
+		case <-refreshTick:
 			if !flushRefresh() {
 				close(taskChannel)
 				return
@@ -568,13 +597,13 @@ func coordinate(
 				}
 
 				queue = append(queue, childTask)
-				if !emitNode(childState, StateQueued) {
+				if wantProgress && !emitNode(childState, StateQueued) {
 					close(taskChannel)
 					return
 				}
 			}
 
-			if !emitNode(state, StateScanning) {
+			if wantProgress && !emitNode(state, StateScanning) {
 				close(taskChannel)
 				return
 			}

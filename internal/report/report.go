@@ -91,6 +91,11 @@ func Run(
 	scanContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// Collect ranks final roll-ups and drops everything else, so asking the
+	// scanner for intermediate states would only pay to build and deliver
+	// updates this function throws away.
+	scanOptions.FinalStatesOnly = true
+
 	report := Collect(scan.Start(scanContext, roots, scanOptions), roots, options)
 	if report.Cancelled {
 		// Ranking a tree that was never finished would silently understate

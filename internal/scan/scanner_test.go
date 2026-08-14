@@ -762,3 +762,75 @@ func TestProgressCarriesElapsedMeasuredByTheScanner(t *testing.T) {
 		t.Fatalf("final elapsed = %s, want a positive duration within %s", final.Progress.Elapsed, outside)
 	}
 }
+
+func TestFinalStatesOnlySendsOneFinalEventPerDirectory(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	for index := range 8 {
+		branch := filepath.Join(root, fmt.Sprintf("branch-%d", index))
+		makeChain(t, branch, 6)
+		if err := os.WriteFile(filepath.Join(branch, "file"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	roots, err := ResolveRoots([]string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	full := make(map[string]inventory.Metrics)
+	for _, event := range collectEvents(t, roots, Options{Workers: 4}) {
+		if event.Node != nil && final(event.Node.State) {
+			full[event.Node.Path] = event.Node.Metrics
+		}
+	}
+
+	seen := make(map[string]int)
+	var terminal Event
+	for _, event := range collectEvents(t, roots, Options{
+		Workers:         4,
+		FinalStatesOnly: true,
+	}) {
+		if event.Done {
+			terminal = event
+		}
+		node := event.Node
+		if node == nil {
+			continue
+		}
+		if !final(node.State) {
+			t.Fatalf("%s was reported as %q, want only final states", node.Path, node.State)
+		}
+		seen[node.Path]++
+		if want, ok := full[node.Path]; !ok || want != node.Metrics {
+			t.Fatalf("%s metrics = %+v, want %+v", node.Path, node.Metrics, want)
+		}
+	}
+
+	if !terminal.Done || terminal.Cancelled {
+		t.Fatal("scan produced no terminal completion event")
+	}
+	if want := walkExactMetrics(t, root); terminal.Summary != want {
+		t.Fatalf("summary = %+v, want %+v", terminal.Summary, want)
+	}
+	if len(seen) != len(full) {
+		t.Fatalf("reported %d directories, want %d", len(seen), len(full))
+	}
+	for path, count := range seen {
+		if count != 1 {
+			t.Fatalf("%s was reported %d times, want once", path, count)
+		}
+	}
+}
+
+// final reports whether a state is the last one a directory can be given.
+func final(state State) bool {
+	switch state {
+	case StateComplete, StatePartial, StateSkipped, StateAlias:
+		return true
+	default:
+		return false
+	}
+}

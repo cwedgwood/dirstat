@@ -165,6 +165,9 @@ func run() int {
 	}
 
 	if oneShot {
+		// A ranked list is printed after the scan ends, so nothing watches it
+		// happen and every intermediate directory update would be discarded.
+		scanOptions.FinalStatesOnly = true
 		err := report.Run(
 			context.Background(),
 			roots,
