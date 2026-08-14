@@ -188,6 +188,38 @@ func TestSortPickerSelectsInodes(t *testing.T) {
 	}
 }
 
+func TestTiesBreakAlphabeticallyInBothDirections(t *testing.T) {
+	t.Parallel()
+
+	model := testModel()
+	for _, update := range []scan.NodeUpdate{
+		{ID: "/root", Path: "/root", Name: "root", Root: true},
+		{ID: "/root/zulu", ParentID: "/root", Path: "/root/zulu", Name: "zulu"},
+		{ID: "/root/alpha", ParentID: "/root", Path: "/root/alpha", Name: "alpha"},
+	} {
+		model.applyEvent(scan.Event{Node: &update})
+	}
+
+	for _, descending := range []bool{true, false} {
+		model.descending = descending
+		rows := model.visibleRows()
+		if rows[1].id != "/root/alpha" || rows[2].id != "/root/zulu" {
+			t.Fatalf("descending=%t reordered rows equal under the metric: %+v", descending, rows)
+		}
+	}
+
+	// Sorting by name is the one case where the direction owns the order.
+	model.applySortChoice(inventory.SortName)
+	rows := model.visibleRows()
+	if rows[1].id != "/root/alpha" {
+		t.Fatalf("name sorting did not open alphabetically: %+v", rows)
+	}
+	model.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'O'}})
+	if rows := model.visibleRows(); rows[1].id != "/root/zulu" {
+		t.Fatalf("reversed name sorting did not start at Z: %+v", rows)
+	}
+}
+
 func TestPageUpAndPageDownMoveByViewport(t *testing.T) {
 	t.Parallel()
 

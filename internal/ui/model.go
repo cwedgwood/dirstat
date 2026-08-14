@@ -489,14 +489,26 @@ func (m *Model) sortedNodes(nodes []*treeNode) []*treeNode {
 	}
 	sorted := append([]*treeNode(nil), nodes...)
 	slices.SortStableFunc(sorted, func(left *treeNode, right *treeNode) int {
-		comparison := m.sortField.Compare(left.metrics, right.metrics)
-		if comparison == 0 {
-			comparison = strings.Compare(left.lowerName, right.lowerName)
+		byName := strings.Compare(left.lowerName, right.lowerName)
+		// Sorting by name has no metric behind it, so the name is the sort
+		// itself and reversing it is the point.
+		if m.sortField == inventory.SortName {
+			if m.descending {
+				return -byName
+			}
+			return byName
 		}
+		byMetric := m.sortField.Compare(left.metrics, right.metrics)
 		if m.descending {
-			return -comparison
+			byMetric = -byMetric
 		}
-		return comparison
+		if byMetric != 0 {
+			return byMetric
+		}
+		// The tiebreak runs alphabetically whichever way the metric does, as
+		// the ranked list orders it. Reversing the metric should not also
+		// shuffle rows that are equal under it.
+		return byName
 	})
 	return sorted
 }
