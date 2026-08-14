@@ -57,8 +57,10 @@ jobs:
       # The version comes from the tag the toolchain read out of the checkout,
       # not from anything this workflow passes in, so it can fail quietly: a
       # shallow checkout without the tag, or git declining to trust the
-      # directory, yields a binary calling itself (devel). Ask the artefact
-      # what it is rather than assuming.
+      # directory, yields a binary calling itself (devel). A tag of v2.0.0 or
+      # above is rejected too, since Go requires a matching /v2 suffix on the
+      # module path before it will treat one as this module's version. Ask the
+      # artefact what it is rather than assuming.
       - name: the binary knows which release it is
         run: |
           set -eu
