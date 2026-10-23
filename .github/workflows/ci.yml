@@ -25,7 +25,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # 1.25 is the declared floor (go.mod): the oldest Go still receiving security
+  # 1.26 is the declared floor (go.mod): the oldest Go still receiving security
   # fixes, since Go supports the last two majors. Testing it alongside stable is
   # what keeps that claim honest rather than aspirational.
   test:
@@ -34,7 +34,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        go: ["1.25.x", "stable"]
+        go: ["1.26.x", "stable"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -100,10 +100,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: stable
+          # Keep the analyzer on a supported Go minor when stable advances.
+          # Staticcheck 2026.2.2 supports Go 1.27.2's export data format.
+          go-version: "1.27.x"
           check-latest: true
       - name: install staticcheck
-        run: go install honnef.co/go/tools/cmd/staticcheck@v0.7.0
+        run: go install honnef.co/go/tools/cmd/staticcheck@v0.8.2
       - name: staticcheck
         run: staticcheck ./...
 

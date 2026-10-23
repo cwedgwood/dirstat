@@ -10,8 +10,12 @@ dirstat --top 10 --sort inodes ~
 numbers of file entries, unique inodes, or disk blocks. It scans incrementally and displays
 recursively rolled-up totals in an interactive tree, or prints a ranked list and exits.
 
-`go install` needs Go 1.25 or newer and puts `dirstat` in `$(go env GOPATH)/bin`, which must be on
+`go install` needs Go 1.26 or newer and puts `dirstat` in `$(go env GOPATH)/bin`, which must be on
 your `$PATH`.
+
+Go 1.25 is no longer supported. CI tests the Go 1.26 floor and the latest stable Go release.
+Staticcheck is pinned to 2026.2.2 (`v0.8.2`) and runs with Go 1.27; update those together when
+adopting a newer analyzer toolchain.
 
 ## Other ways to install
 
