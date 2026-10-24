@@ -5,6 +5,11 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    # These modules share pre-v1 APIs; update their compatible set together.
+    groups:
+      charmbracelet:
+        patterns:
+          - "github.com/charmbracelet/*"
 
   # Actions are pinned to immutable commit SHAs. Dependabot keeps those pins
   # current without weakening the supply-chain guarantee.
@@ -13,3 +18,8 @@ updates:
     schedule:
       interval: monthly
     open-pull-requests-limit: 5
+    # init and analyze exchange versioned configuration and must stay in sync.
+    groups:
+      codeql:
+        patterns:
+          - "github/codeql-action/*"
